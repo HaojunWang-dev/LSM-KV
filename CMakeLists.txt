@@ -10,6 +10,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(lsm_kv
     src/arena.cc
     src/coding.cc
+    src/crc32c.cc
     src/memtable.cc
     src/status.cc
     src/write_batch.cc
@@ -28,8 +29,11 @@ if(BUILD_TESTING)
     add_executable(lsm_kv_tests
         tests/unit/arena_test.cc
         tests/unit/coding_test.cc
+        tests/unit/crc32c_test.cc
+        tests/unit/env_test.cc
         tests/unit/internal_key_test.cc
         tests/unit/lookup_key_test.cc
+        tests/unit/log_writer_test.cc
         tests/unit/slice_test.cc
         tests/unit/skiplist_test.cc
         tests/unit/memtable_test.cc
