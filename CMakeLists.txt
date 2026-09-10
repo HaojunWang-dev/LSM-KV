@@ -11,6 +11,8 @@ add_library(lsm_kv
     src/arena.cc
     src/coding.cc
     src/memtable.cc
+    src/status.cc
+    src/write_batch.cc
 )
 
 target_include_directories(lsm_kv
@@ -31,6 +33,8 @@ if(BUILD_TESTING)
         tests/unit/slice_test.cc
         tests/unit/skiplist_test.cc
         tests/unit/memtable_test.cc
+        tests/unit/status_test.cc
+        tests/unit/write_batch_test.cc
     )
 
     target_link_libraries(lsm_kv_tests
