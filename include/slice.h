@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstring>
 #include <string>
+#include <cassert>
 
 namespace LSMKV {
 
@@ -57,6 +58,30 @@ public:
         }
 
         return r;
+    }
+
+    char operator[](size_t n)
+    {
+        assert(n < size());
+        return data_[n];
+    }
+
+    void clear()
+    {
+        data_ = "";
+        size_ = 0;
+    }
+
+    void remove_prefix(size_t n)
+    {
+        assert(n <= size());
+        data_ += n;
+        size_ -= n;
+    }
+
+    bool start_with(const Slice& x)
+    {
+        return ((size_ >= x.size()) && (memcmp(data_, x.data(), x.size()) == 0));
     }
 private:
     const char* data_;

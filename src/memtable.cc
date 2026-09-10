@@ -15,7 +15,7 @@ Slice DecodeInternalKey(const char* entry)
     // entry 的首字段是 varint32 internal_key_size，返回的 Slice 不包含该长度字段。
     uint32_t internal_key_size = 0;
     
-    const char* key_ptr = DecodeVarint32(entry, &internal_key_size);
+    const char* key_ptr = DecodeVarint32(entry, entry + 5, &internal_key_size);
 
     assert(key_ptr != nullptr);
 
@@ -144,7 +144,7 @@ Slice MemTable::Iterator::value() const
     const char* entry = iter_.key();
 
     uint32_t internal_key_size = 0;
-    const char* p = DecodeVarint32(entry, &internal_key_size);
+    const char* p = DecodeVarint32(entry, entry + 5, &internal_key_size);
 
     assert(p != nullptr);
 
@@ -152,7 +152,7 @@ Slice MemTable::Iterator::value() const
     p += internal_key_size;
 
     uint32_t value_size = 0;
-    p = DecodeVarint32(p, &value_size);
+    p = DecodeVarint32(p, p + 5, &value_size);
 
     assert(p != nullptr);
 
@@ -168,7 +168,7 @@ const char* MemTable::GetValuePointer(const char* entry)
 {
     uint32_t internal_key_size = 0;
 
-    const char* p = DecodeVarint32(entry, &internal_key_size);
+    const char* p = DecodeVarint32(entry, entry + 5, &internal_key_size);
 
     assert(p != nullptr);
 

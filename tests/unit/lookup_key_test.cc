@@ -19,7 +19,9 @@ TEST(LookupKeyTest, EncodesMemTableKeyAndInternalKeyForBinaryUserKey) {
     const Slice memtable_key = lookup.MemTableKey();
     uint32_t internal_key_size = 0;
     const char* const internal_key_start =
-        DecodeVarint32(memtable_key.data(), &internal_key_size);
+        DecodeVarint32(memtable_key.data(),
+                       memtable_key.data() + memtable_key.size(),
+                       &internal_key_size);
 
     ASSERT_NE(internal_key_start, nullptr);
     EXPECT_EQ(internal_key_size, user_key.size() + 8);
@@ -38,7 +40,9 @@ TEST(LookupKeyTest, UsesMultiByteLengthPrefixAtInternalKeySizeBoundary) {
     const Slice memtable_key = lookup.MemTableKey();
     uint32_t internal_key_size = 0;
     const char* const internal_key_start =
-        DecodeVarint32(memtable_key.data(), &internal_key_size);
+        DecodeVarint32(memtable_key.data(),
+                       memtable_key.data() + memtable_key.size(),
+                       &internal_key_size);
 
     ASSERT_NE(internal_key_start, nullptr);
     EXPECT_EQ(internal_key_size, 128U);

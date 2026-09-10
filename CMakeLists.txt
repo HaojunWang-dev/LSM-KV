@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(lsm_kv
     src/arena.cc
+    src/coding.cc
     src/memtable.cc
 )
 

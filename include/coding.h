@@ -2,94 +2,71 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+
+#include "slice.h"
 
 namespace LSMKV {
 
-// 将 value 以小端序写入 dst 指向的连续 8 字节。
-// 调用方必须保证 dst 至少有 8 字节可写空间；所有 64 位都会被保留。
-inline void EncodeFixed64(char* dst, uint64_t value)
-{
-    uint8_t* const buffer = reinterpret_cast<uint8_t*> (dst);
-    for (int i = 0; i < 8; i++)
-    {
-        buffer[i] = static_cast<uint8_t>(value & 0xff);
-        value >>= 8;
-    }
-}
+// 将 32 位整数以小端序写入 dst；用于稳定的定长磁盘/内存格式。
+void EncodeFixed32(char* dst, uint32_t value);
+// 从 ptr 指向的 4 字节小端序数据还原 32 位整数。
+uint32_t DecodeFixed32(const char* ptr);
+// 将 64 位整数以小端序写入 dst；InternalKey 的 sequence/type tag 依赖此格式。
+void EncodeFixed64(char* dst, uint64_t value);
+// 从 ptr 指向的 8 字节小端序数据还原 64 位整数。
+uint64_t DecodeFixed64(const char* ptr);
 
-// 从 ptr 指向的连续 8 字节按小端序解码一个无符号 64 位整数。
-// 调用方必须保证 ptr 至少有 8 字节可读空间。
-inline uint64_t DecodeFixed64(const char* ptr)
-{
-    uint64_t result = 0;
+// 将固定 32 位整数追加到字符串缓冲区，保留 dst 原有内容。
+void PutFixed32(std::string* dst, uint32_t value);
+// 将固定 64 位整数追加到字符串缓冲区，保留 dst 原有内容。
+void PutFixed64(std::string* dst, uint64_t value);
 
-    for (int i = 7; i >= 0; i--)
-    {
-        result <<= 8;
-        result |= static_cast<unsigned char> (ptr[i]);
-    }
+// 将 32 位整数编码为 base-128 varint；调用方需提供最多 5 字节空间。
+char* EncodeVarint32(char* dst, uint32_t value);
+// 将 64 位整数编码为 base-128 varint；调用方需提供最多 10 字节空间。
+char* EncodeVarint64(char* dst, uint64_t value);
+// 将 32 位 varint 追加到字符串缓冲区。
+void PutVarint32(std::string* dst, uint32_t value);
+// 将 64 位 varint 追加到字符串缓冲区。
+void PutVarint64(std::string* dst, uint64_t value);
 
-    return result;
-}
+// 在 [ptr, limit) 内解码 32 位 varint；失败时不会修改 *value。
+const char* DecodeVarint32(const char* ptr, const char* limit, uint32_t* value);
+// 在 [ptr, limit) 内解码 64 位 varint；失败时不会修改 *value。
+const char* DecodeVarint64(const char* ptr, const char* limit, uint64_t* value);
 
-// 将 value 编码为可变长度的 base-128 整数并写入 dst。
-// 每个字节的最高位表示后续是否还有数据；返回值指向最后一个已写字节的后一个位置。
-// 调用方需保证 dst 有足够空间（uint32_t 最多需要 5 字节）。
-inline char* EncodeVarint32(char* dst, uint32_t value)
-{
-    unsigned char* ptr = reinterpret_cast<unsigned char*>(dst);
+// 返回 value 采用 varint 格式所需的最小字节数，用于预先计算编码空间。
+size_t VarintLength(uint64_t value);
 
-    while (value >= 128)
-    {
-        *ptr++ = static_cast<unsigned char> (value | 0x80);
-        
-        value >>= 7;
-    }
+// 处理多字节或边界不足的 32 位 varint 解码慢路径。
+const char* GetVarint32PtrFallback(const char* p, const char* limit,
+                                    uint32_t* value);
+// 处理 64 位 varint 的带边界解码路径。
+const char* GetVarint64PtrFallback(const char* p, const char* limit,
+                                    uint64_t* value);
 
-    *ptr++ = static_cast<unsigned char> (value);
-
-    return reinterpret_cast<char*>(ptr);
-}
-
-// 从 ptr 解码一个 varint32，并在成功时写入 *value。
-// 成功返回编码末尾的后一个位置；若前 5 字节中不存在终止字节则返回 nullptr。
-// 由于接口不携带长度，调用方必须保证 ptr 至少有 5 字节可读空间。
-inline const char* DecodeVarint32(const char* ptr, uint32_t* value)
-{
-    uint32_t result = 0;
-
-    for (uint32_t shift = 0; shift <= 28; shift+= 7)
-    {
-        uint32_t byte = static_cast<unsigned char> (*ptr++);
-
-        if (byte & 128)
-        {
-            result |= (byte & 127) << shift;
-        }
-        else 
-        {
-            result |= (byte) << shift;
-
+// 单字节 varint32 的常见路径，其他情况交给带边界检查的 fallback。
+inline const char* GetVarint32Ptr(const char* p, const char* limit,
+                                  uint32_t* value) {
+    if (p < limit) {
+        const uint32_t result = static_cast<unsigned char>(*p);
+        if ((result & 0x80U) == 0) {
             *value = result;
-
-            return ptr;
+            return p + 1;
         }
     }
-
-    return nullptr;
+    return GetVarint32PtrFallback(p, limit, value);
 }
 
-// 返回 value 采用 base-128 varint 编码时所需的最小字节数。
-inline size_t VarintLength(uint64_t value)
-{
-    size_t len = 1;
+// 从 input 前端读取 32 位 varint；成功时前移 input，失败时 input 保持不变。
+bool GetVarint32(Slice* input, uint32_t* value);
+// 从 input 前端读取 64 位 varint；成功时前移 input，失败时 input 保持不变。
+bool GetVarint64(Slice* input, uint64_t* value);
 
-    while (value >= 128)
-    {
-        value >>= 7;
-        ++len;
-    }
+// 追加 [varint32 length][bytes] 格式的 Slice，适用于二进制 key 和 value。
+void PutLengthPrefixedSlice(std::string* dst, const Slice& value);
+// 读取一个长度前缀 Slice；成功时 result 借用输入字节且 input 前进。
+bool GetLengthPrefixedSlice(Slice* input, Slice* result);
 
-    return len;
-}
-}
+}  // namespace LSMKV
