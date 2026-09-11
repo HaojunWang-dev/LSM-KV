@@ -7,6 +7,7 @@ namespace LSMKV {
 
 // WritableFile 是 WAL 所需的顺序写文件抽象。
 // 调用方负责对象生命周期；同一个实例只允许一个写线程访问。
+
 class WritableFile {
  public:
   WritableFile() = default;

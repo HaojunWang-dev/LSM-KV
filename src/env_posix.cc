@@ -1,3 +1,4 @@
+#include "env_posix.h"
 #include "env.h"
 #include "status.h"
 
@@ -29,7 +30,8 @@
 #include <sys/time.h>
 #include <thread>
 #include <type_traits>
-#include <utility>#include <dirent.h>
+#include <utility>
+#include <dirent.h>
 
 namespace LSMKV {
 
@@ -44,6 +46,8 @@ Status PosixError(const std::string& context, int error_number) {
     return Status::IOError(context, std::strerror(error_number));
   }
 }
+
+
 
 class PosixWritableFile final : public WritableFile {
 public:
@@ -173,4 +177,20 @@ private:
   const std::string dirname_;
 };
 } // namespace
+
+Status NewPosixWritableFile(const std::string &filename, std::unique_ptr<WritableFile> *result)
+{
+  assert (result != nullptr && *result == nullptr);
+
+  const int fd = ::open(filename.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0664);
+
+  if (fd < 0)
+  {
+    return PosixError(filename, errno);
+  }
+
+  *result = std::make_unique<PosixWritableFile> (filename, fd);
+  return Status::OK();
+}
+
 } // namespace LSMKV
