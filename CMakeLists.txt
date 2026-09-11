@@ -15,6 +15,7 @@ add_library(lsm_kv
     src/status.cc
     src/write_batch.cc
     src/env_posix.cc
+    src/log_writer.cc
 )
 
 target_include_directories(lsm_kv
