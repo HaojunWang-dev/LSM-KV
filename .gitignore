@@ -3,3 +3,5 @@ CMakeFiles
 build*
 *.json
 AGENTS.md
+docs
+.superpowers

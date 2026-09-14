@@ -16,6 +16,7 @@ add_library(lsm_kv
     src/write_batch.cc
     src/env_posix.cc
     src/log_writer.cc
+    src/log_reader.cc
 )
 
 target_include_directories(lsm_kv
@@ -36,6 +37,7 @@ if(BUILD_TESTING)
         tests/unit/env_posix_test.cc
         tests/unit/internal_key_test.cc
         tests/unit/lookup_key_test.cc
+        tests/unit/log_reader_test.cc
         tests/unit/log_writer_test.cc
         tests/unit/slice_test.cc
         tests/unit/skiplist_test.cc

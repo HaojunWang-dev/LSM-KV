@@ -4,6 +4,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <memory>
 #include <sys/mman.h>
 #ifndef __Fuchsia__
 #include <sys/resource.h>
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits>
 #include <queue>
@@ -31,7 +33,6 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <dirent.h>
 
 namespace LSMKV {
 
@@ -39,15 +40,13 @@ namespace {
 
 constexpr const int kWritableFileBufferSize = 65536;
 
-Status PosixError(const std::string& context, int error_number) {
+Status PosixError(const std::string &context, int error_number) {
   if (error_number == ENOENT) {
     return Status::NotFound(context, std::strerror(error_number));
   } else {
     return Status::IOError(context, std::strerror(error_number));
   }
 }
-
-
 
 class PosixWritableFile final : public WritableFile {
 public:
@@ -92,7 +91,7 @@ public:
     Status status = FlushBuffer();
     const int close_result = ::close(fd_);
     if (close_result < 0 && status.ok()) {
-        return PosixError(filename_, errno);
+      return PosixError(filename_, errno);
     }
     fd_ = -1;
     return status;
@@ -101,8 +100,6 @@ public:
   Status Flush() override { return FlushBuffer(); }
 
   Status Sync() override {
-    /*todo*/
-
     Status status = FlushBuffer();
     if (!status.ok()) {
       return status;
@@ -133,16 +130,13 @@ private:
     return Status::OK();
   }
 
-  static Status SyncFd(int fd, const std::string& fd_path)
-  {
+  static Status SyncFd(int fd, const std::string &fd_path) {
     bool sync_success = ::fdatasync(fd) == 0;
 
-    if (sync_success)
-    {
-        return Status::OK();
-    }
-    else {
-        return PosixError(fd_path, errno);
+    if (sync_success) {
+      return Status::OK();
+    } else {
+      return PosixError(fd_path, errno);
     }
   }
   static std::string Dirname(const std::string &filename) {
@@ -176,21 +170,110 @@ private:
   const std::string filename_;
   const std::string dirname_;
 };
+
+class PosixSequentialFile final : public SequentialFile {
+public:
+  PosixSequentialFile(std::string filename, int fd)
+      : fd_(fd), filename_(std::move(filename)) {}
+
+  ~PosixSequentialFile() override { close(fd_); };
+
+  Status Read(size_t n, Slice* result, char* scratch) override
+  {
+    Status status;
+
+    while (true)
+    {
+      ::ssize_t read_size = ::read(fd_, scratch, n);
+      if (read_size < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        status = PosixError(filename_, errno);
+        break;
+      }
+      *result = Slice(scratch, read_size);
+      break;
+    }
+    return status;
+  }
+
+  Status Skip(uint64_t n) override {
+      if (n > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+        return Status::InvalidArgument(filename_, "skip offset exceeds off_t range");
+      }
+
+      if (::lseek(fd_, static_cast<off_t>(n), SEEK_CUR) ==
+          static_cast<off_t>(-1))
+      {
+        return PosixError(filename_, errno);
+      }
+
+      return Status::OK();
+  }
+private:
+  const int fd_;
+  const std::string filename_;
+};
+
 } // namespace
 
-Status NewPosixWritableFile(const std::string &filename, std::unique_ptr<WritableFile> *result)
-{
-  assert (result != nullptr && *result == nullptr);
+Status PosixEnv::NewWritableFile(const std::string &filename,
+                                 std::unique_ptr<WritableFile> *result) {
+  assert(result != nullptr && *result == nullptr);
 
   const int fd = ::open(filename.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0664);
 
-  if (fd < 0)
-  {
+  if (fd < 0) {
     return PosixError(filename, errno);
   }
 
-  *result = std::make_unique<PosixWritableFile> (filename, fd);
+  *result = std::make_unique<PosixWritableFile>(filename, fd);
   return Status::OK();
 }
 
+
+Status PosixEnv::NewSequentialFile(const std::string &filename, std::unique_ptr<SequentialFile> *result)
+{
+  assert(result != nullptr && *result == nullptr);
+
+  const int fd = ::open(filename.c_str(), O_RDONLY, 0664);
+
+  if (fd < 0) {
+    return PosixError(filename, errno);
+  }
+
+  *result = std::make_unique<PosixSequentialFile> (filename, fd);
+  return Status::OK();
+}
+
+Status PosixEnv::FileExists(const std::string& filename, bool* exists) {
+  assert(exists != nullptr);
+
+  struct stat file_stat;
+  if (::stat(filename.c_str(), &file_stat) == 0) {
+    *exists = true;
+    return Status::OK();
+  }
+  if (errno == ENOENT) {
+    *exists = false;
+    return Status::OK();
+  }
+  return PosixError(filename, errno);
+}
+
+Status PosixEnv::CreateDir(const std::string& dirname) {
+  if (::mkdir(dirname.c_str(), 0755) != 0) {
+    return PosixError(dirname, errno);
+  }
+  return Status::OK();
+}
+
+Env* Env::Default() {
+  static PosixEnv default_env;
+  return &default_env;
+}
 } // namespace LSMKV
