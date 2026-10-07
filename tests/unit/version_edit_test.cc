@@ -3,6 +3,7 @@
 #include <string>
 #include <type_traits>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -146,6 +147,98 @@ TEST(VersionEditTest, ReplacesStateAndUsesLastRepeatedScalar) {
   const std::string input("\x02\x01\x02\x80\x01\x06\x00\x05\x06\x00\x05", 11);
   ASSERT_TRUE(edit.DecodeFrom(Slice(input)).ok());
   EXPECT_EQ(EncodeEdit(edit), std::string("\x02\x80\x01\x06\x00\x05", 6));
+}
+
+TEST(VersionEditTest, AcceptsUnorderedFieldsAndUsesLastValueOfEveryScalar) {
+  const char bytes[] = "\x09\x01\x04\x03\x01\x03old\x03\x05\x02\x02"
+                       "\x01\x03new\x09\x04\x04\x07\x03\x09\x02\x08";
+  const char expected[] = "\x01\x03new\x02\x08\x09\x04\x03\x09\x04\x07";
+  VersionEdit edit;
+  ASSERT_TRUE(edit.DecodeFrom(Slice(bytes, sizeof(bytes) - 1)).ok());
+  EXPECT_EQ(EncodeEdit(edit), std::string(expected, sizeof(expected) - 1));
+}
+
+TEST(VersionEditTest, EncodesFileNumbersAtVarintBoundaries) {
+  struct Entry { uint64_t number; std::string encoded; };
+  const Entry entries[] = {
+      {0, std::string("\x00", 1)}, {127, "\x7f"}, {128, "\x80\x01"},
+      {16383, "\xff\x7f"}, {16384, "\x80\x80\x01"},
+      {1ULL << 40, "\x80\x80\x80\x80\x80\x20"},
+      {std::numeric_limits<uint64_t>::max(), "\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01"}};
+  for (const auto& entry : entries) {
+    SCOPED_TRACE(entry.number);
+    VersionEdit edit;
+    edit.SetLogNumber(entry.number);
+    edit.SetPrevLogNumber(entry.number);
+    edit.SetNextFile(entry.number);
+    const std::string expected = "\x02" + entry.encoded + "\x09" + entry.encoded + "\x03" + entry.encoded;
+    EXPECT_EQ(EncodeEdit(edit), expected);
+    VersionEdit decoded;
+    ASSERT_TRUE(decoded.DecodeFrom(expected).ok());
+    EXPECT_EQ(EncodeEdit(decoded), expected);
+  }
+}
+
+TEST(VersionEditTest, KeepsPointerAndNewFileOrderButDeduplicatesDeletedFiles) {
+  const InternalKey key(Slice(), 0, ValueType::kValue);
+  VersionEdit edit;
+  edit.SetCompactPointer(6, key);
+  edit.SetCompactPointer(0, key);
+  edit.RemoveFile(6, 9);
+  edit.RemoveFile(0, 3);
+  edit.RemoveFile(6, 9);
+  edit.AddFile(6, 9, 2, key, key);
+  edit.AddFile(0, 3, 1, key, key);
+  const std::string bound("\x08\x01\x00\x00\x00\x00\x00\x00\x00", 9);
+  const std::string expected = std::string("\x05\x06", 2) + bound +
+      std::string("\x05\x00", 2) + bound +
+      std::string("\x06\x00\x03\x06\x06\x09\x07\x06\x09\x02", 10) + bound + bound +
+      std::string("\x07\x00\x03\x01", 4) + bound + bound;
+  EXPECT_EQ(EncodeEdit(edit), expected);
+  VersionEdit decoded;
+  ASSERT_TRUE(decoded.DecodeFrom(expected).ok());
+  EXPECT_EQ(EncodeEdit(decoded), expected);
+}
+
+TEST(VersionEditTest, CanDecodeAgainAfterCorruptionWithoutRetainingOldFields) {
+  VersionEdit edit;
+  edit.SetComparatorName("old comparator");
+  edit.SetCompactPointer(1, InternalKey("old", 9, ValueType::kValue));
+  EXPECT_TRUE(edit.DecodeFrom(Slice("\x02\x01\x08", 3)).IsCorruption());
+  EXPECT_TRUE(EncodeEdit(edit).empty());
+  ASSERT_TRUE(edit.DecodeFrom(Slice("\x04\x7f", 2)).ok());
+  EXPECT_EQ(EncodeEdit(edit), std::string("\x04\x7f", 2));
+}
+
+TEST(VersionEditTest, CopyAndRvalueConstructionOwnComparatorAndFileBounds) {
+  VersionEdit original;
+  original.SetComparatorName(Slice("cmp\0name", 8));
+  original.SetCompactPointer(1, InternalKey("pointer", 8, ValueType::kValue));
+  original.AddFile(1, 99, 128, InternalKey(Slice("a\0", 2), 8, ValueType::kValue),
+                   InternalKey("z", 7, ValueType::kDeletion));
+  const std::string expected = EncodeEdit(original);
+  VersionEdit copy = original;
+  original.Clear();
+  EXPECT_EQ(EncodeEdit(copy), expected);
+  VersionEdit moved = std::move(copy);
+  copy.Clear();
+  EXPECT_EQ(EncodeEdit(moved), expected);
+}
+
+TEST(VersionEditTest, RejectsTrailingUnknownTagAfterCompleteCompositeEdit) {
+  VersionEdit source;
+  source.SetComparatorName("cmp");
+  source.SetLogNumber(2);
+  source.SetNextFile(50);
+  source.SetLastSequence(9);
+  source.SetCompactPointer(1, InternalKey("p", 9, ValueType::kValue));
+  source.RemoveFile(1, 20);
+  source.AddFile(0, 30, 100, InternalKey("a", 9, ValueType::kValue),
+                 InternalKey("z", 8, ValueType::kDeletion));
+  VersionEdit decoded;
+  const std::string bytes = EncodeEdit(source) + std::string("\x08", 1);
+  EXPECT_TRUE(decoded.DecodeFrom(bytes).IsCorruption());
+  EXPECT_TRUE(EncodeEdit(decoded).empty());
 }
 
 TEST(VersionEditTest, RejectsEveryTruncatedSingleField) {

@@ -690,6 +690,35 @@ Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu)
       delete descriptor_log_;
       descriptor_file_ = nullptr;
       descriptor_log_ = nullptr;
+      // TODO：这里的失败清理没有区分 CURRENT 更新前、更新后的错误。
+      // 可能出现问题的调用链（以新 MANIFEST 编号 50 为例）：
+      //   1. LogAndApply() 创建 MANIFEST-000050，调用 WriteSnapshot() 写入
+      //      当前版本的快照，再经 VersionEdit::EncodeTo() / Writer::AddRecord()
+      //      追加本次编辑；descriptor_file_->Sync() 同步 MANIFEST 文件内容。
+      //      此时候选 Version v 尚未安装，current_ 仍然是旧版本。
+      //   2. LogAndApply() 调用 SetCurrentFile(env_, dbname_, 50)。后者创建
+      //      000050.dbtmp，写入 "MANIFEST-000050\n"，再 Sync() / Close()。
+      //   3. SetCurrentFile() 第一次调用 Env::SyncDir(dbname_)，同步临时文件
+      //      和 MANIFEST 等目录项；然后调用 Env::RenameFile(tmp, CURRENT)。
+      //      POSIX 实现通过 rename() 替换 CURRENT：成功后，新引用已可见，
+      //      CURRENT 已指向 MANIFEST-000050，但重命名的持久性尚需确认。
+      //   4. SetCurrentFile() 第二次调用 Env::SyncDir(dbname_)，请求持久化
+      //      重命名。若此处返回 IOError（例如目录 fsync() 失败），它只向上
+      //      返回错误，不撤销已经成功的 rename，也不删除新 MANIFEST。
+      //   5. LogAndApply() 收到错误后重新加锁，跳过 AppendVersion(v)，进入
+      //      本分支：delete v 丢弃候选版本；释放 descriptor_file_ 和
+      //      descriptor_log_ 会释放对象、关闭句柄，但不会撤销 CURRENT 的切换。
+      //      随后的 RemoveFile(new_manifest_file) 才会通过 unlink() 删除
+      //      MANIFEST-000050，导致 CURRENT 引用一个已经不存在的文件。
+      //   6. 下次 Recover() 经 ReadFileToString(CurrentFileName(...)) 读到
+      //      "MANIFEST-000050\n"，但 NewSequentialFile() 打开它返回 NotFound，
+      //      Recover() 因而返回 Corruption，无法恢复数据库。
+      // 返回错误不等于磁盘状态未改变；RenameFile 的原子替换也不等于已持久化。
+      // 后续修复须报告 CURRENT 是否可能已改变，只在确定尚未发布引用时删除
+      // 新 MANIFEST。对于结果不确定的更新，还须阻止直接重试：当前清空了
+      // descriptor_file_ / descriptor_log_，下次 LogAndApply() 可能用相同
+      // manifest_file_number_ 再调用 NewWritableFile()；其 O_TRUNC 会截断
+      // 被 CURRENT 引用的 MANIFEST。仅跳过下面的 RemoveFile() 仍不够安全。
       env_->RemoveFile(new_manifest_file);
     }
   }
@@ -809,6 +838,13 @@ Status VersionSet::Recover(bool* save_manifest) {
   }
   current.resize(current.size() - 1);
 
+  uint64_t current_manifest_number = 0;
+  FileType current_type;
+  if (!ParseFileName(current, &current_manifest_number, &current_type) ||
+      current_type != FileType::kDescriptorFile || current_manifest_number == 0) {
+    return Status::Corruption("CURRENT contains invalid MANIFEST name");
+  }
+
   std::string dscname = dbname_ + "/" + current;
 
   SequentialFile* file;
@@ -829,6 +865,7 @@ Status VersionSet::Recover(bool* save_manifest) {
   uint64_t last_sequence = 0;
   uint64_t log_number = 0;
   uint64_t prev_log_number = 0;
+  uint64_t max_referenced_file = current_manifest_number;
   Builder builder(this, current_);
   int read_records = 0;
 
@@ -849,16 +886,21 @@ Status VersionSet::Recover(bool* save_manifest) {
         }
       }
       if (s.ok()) {
+        for (const auto& added : edit.new_files_) {
+          max_referenced_file = std::max(max_referenced_file, added.second.number);
+        }
         builder.Apply(&edit);
       }
 
       if (edit.has_log_number_) {
         log_number = edit.log_number_;
+        max_referenced_file = std::max(max_referenced_file, log_number);
         have_log_number = true;
       }
 
       if (edit.has_prev_log_number_) {
         prev_log_number = edit.prev_log_number_;
+        max_referenced_file = std::max(max_referenced_file, prev_log_number);
         have_prev_log_number = true;
       }
 
@@ -891,8 +933,14 @@ Status VersionSet::Recover(bool* save_manifest) {
       prev_log_number = 0;
     }
 
-    MarkFileNumberUsed(prev_log_number);
-    MarkFileNumberUsed(log_number);
+    // next_file 将被预留给新 MANIFEST，之后还必须有可分配的文件编号。
+    // 不可信的磁盘字段须在加一或安装版本之前校验，不能依赖 Debug assert。
+    if (s.ok() && next_file >= std::numeric_limits<uint64_t>::max() - 1) {
+      s = Status::Corruption("next-file number leaves no room for allocation");
+    }
+    if (s.ok() && next_file <= max_referenced_file) {
+      s = Status::Corruption("next-file number is not above referenced files");
+    }
   }
 
   if (s.ok()) {
