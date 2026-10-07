@@ -4,8 +4,7 @@
 #include <cstring>
 
 #include "coding.h"
-#include "internal_key.h"
-#include "lookup_key.h"
+#include "format.h"
 
 namespace LSMKV {
 namespace {
@@ -29,14 +28,14 @@ int MemTable::KeyComparator::operator()(const char* a, const char* b) const
     Slice a_key = DecodeInternalKey(a);
     Slice b_key = DecodeInternalKey(b);
 
-    InternalKeyComparator comparator;
-
-    return comparator.Compare(a_key, b_key);
+    return internal_comparator.Compare(a_key, b_key);
 }
 
-MemTable::MemTable()
+MemTable::MemTable() : MemTable(BytewiseComparator()) {}
+
+MemTable::MemTable(const Comparator* user_comparator)
     : arena_(),
-      comparator_(),
+      comparator_(user_comparator),
       table_(comparator_, &arena_) {}
 
 
@@ -80,7 +79,7 @@ MemTable::GetResult MemTable::Get(const LookupKey& key, std::string* value) cons
 
     // InternalKeyComparator 按 sequence 降序排列，因此 lower_bound 正好找到
     // 不晚于 snapshot 的最新候选版本。
-    iter.Seek(key.InternalKey());
+    iter.Seek(key.internal_key());
 
     if (!iter.Valid()) {
         return GetResult::kNotFound;
@@ -91,7 +90,8 @@ MemTable::GetResult MemTable::Get(const LookupKey& key, std::string* value) cons
     Slice user_key = ExtractUserKey(internal_key);
 
     // Seek 可能越过目标 UserKey；必须再次确认用户键一致。
-    if (user_key.Compare(key.UserKey()) != 0)
+    if (comparator_.internal_comparator.user_comparator()->Compare(
+            user_key, key.user_key()) != 0)
     {
         return GetResult::kNotFound;
     }

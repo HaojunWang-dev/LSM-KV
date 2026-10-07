@@ -10,6 +10,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(lsm_kv
     src/arena.cc
     src/coding.cc
+    src/comparator.cc
+    src/format.cc
+    src/iterator.cc
     src/crc32c.cc
     src/memtable.cc
     src/status.cc
@@ -17,6 +20,10 @@ add_library(lsm_kv
     src/env_posix.cc
     src/log_writer.cc
     src/log_reader.cc
+    src/VersionEdit.cc
+    src/VersionSet.cc
+    src/filename.cc
+    src/logging.cc
 )
 
 target_include_directories(lsm_kv
@@ -32,10 +39,13 @@ if(BUILD_TESTING)
     add_executable(lsm_kv_tests
         tests/unit/arena_test.cc
         tests/unit/coding_test.cc
+        tests/unit/comparator_test.cc
         tests/unit/crc32c_test.cc
         tests/unit/env_test.cc
         tests/unit/env_posix_test.cc
+        tests/unit/filename_test.cc
         tests/unit/internal_key_test.cc
+        tests/unit/iterator_test.cc
         tests/unit/lookup_key_test.cc
         tests/unit/log_reader_test.cc
         tests/unit/log_writer_test.cc
@@ -44,6 +54,8 @@ if(BUILD_TESTING)
         tests/unit/memtable_test.cc
         tests/unit/status_test.cc
         tests/unit/write_batch_test.cc
+        tests/unit/version_edit_test.cc
+        tests/unit/version_set_test.cc
     )
 
     target_link_libraries(lsm_kv_tests

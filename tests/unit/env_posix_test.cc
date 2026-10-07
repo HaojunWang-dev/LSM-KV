@@ -1,12 +1,15 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <string>
 
 #include <fcntl.h>
+#include <dirent.h>
 #include <gtest/gtest.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "env_posix.h"
@@ -92,8 +95,10 @@ TEST_F(PosixWritableFileTest, FactoryTruncatesExistingFileAndFlushesAppendedData
   ASSERT_TRUE(WriteFile(path_, "stale-wal-data"));
 
   PosixEnv env;
-  std::unique_ptr<WritableFile> file;
-  ASSERT_TRUE(env.NewWritableFile(path_, &file).ok());
+  WritableFile* result = nullptr;
+  const Status status = env.NewWritableFile(path_, &result);
+  std::unique_ptr<WritableFile> file(result);
+  ASSERT_TRUE(status.ok());
   ASSERT_NE(file, nullptr);
   EXPECT_TRUE(file->Append(Slice("new-record")).ok());
   EXPECT_TRUE(file->Flush().ok());
@@ -110,8 +115,10 @@ TEST_F(PosixWritableFileTest, SyncPersistsPayloadThatCrossesTheInternalBuffer) {
   payload.back() = 'Z';
 
   PosixEnv env;
-  std::unique_ptr<WritableFile> file;
-  ASSERT_TRUE(env.NewWritableFile(path_, &file).ok());
+  WritableFile* result = nullptr;
+  const Status status = env.NewWritableFile(path_, &result);
+  std::unique_ptr<WritableFile> file(result);
+  ASSERT_TRUE(status.ok());
   ASSERT_NE(file, nullptr);
   ASSERT_TRUE(file->Append(Slice(payload)).ok());
   ASSERT_TRUE(file->Sync().ok());
@@ -123,9 +130,10 @@ TEST_F(PosixWritableFileTest, SyncPersistsPayloadThatCrossesTheInternalBuffer) {
 TEST_F(PosixWritableFileTest, OpensUsableFileThroughEnvInterface) {
   PosixEnv posix_env;
   Env* env = &posix_env;
-  std::unique_ptr<WritableFile> file;
-
-  ASSERT_TRUE(env->NewWritableFile(path_, &file).ok());
+  WritableFile* result = nullptr;
+  const Status status = env->NewWritableFile(path_, &result);
+  std::unique_ptr<WritableFile> file(result);
+  ASSERT_TRUE(status.ok());
   ASSERT_NE(file, nullptr);
   ASSERT_TRUE(file->Append(Slice("virtual-record")).ok());
   ASSERT_TRUE(file->Close().ok());
@@ -133,15 +141,86 @@ TEST_F(PosixWritableFileTest, OpensUsableFileThroughEnvInterface) {
   EXPECT_EQ(ReadFile(path_), "virtual-record");
 }
 
+TEST_F(PosixWritableFileTest, RawFactoryTransfersOwnershipToCaller) {
+  PosixEnv posix_env;
+  Env* env = &posix_env;
+  WritableFile* result = nullptr;
+  const Status status = env->NewWritableFile(path_, &result);
+  std::unique_ptr<WritableFile> file(result);
+  ASSERT_TRUE(status.ok());
+  ASSERT_NE(result, nullptr);
+  ASSERT_TRUE(result->Append(Slice("caller-owned")).ok());
+  ASSERT_TRUE(result->Sync().ok());
+  file.reset();
+  EXPECT_EQ(ReadFile(path_), "caller-owned");
+}
+
+TEST_F(PosixWritableFileTest, RawFactoryFailureClearsOutputWithoutDeletingPriorObject) {
+  PosixEnv env;
+  WritableFile* original = nullptr;
+  const Status created = env.NewWritableFile(path_, &original);
+  std::unique_ptr<WritableFile> owner(original);
+  ASSERT_TRUE(created.ok());
+  WritableFile* output = original;  // 借用已有对象，owner 仍保留其所有权。
+  const Status failed = env.NewWritableFile(path_ + "/child", &output);
+  EXPECT_TRUE(failed.IsIOError());
+  EXPECT_EQ(output, nullptr);
+  ASSERT_TRUE(owner->Append(Slice("still-owned")).ok());
+  ASSERT_TRUE(owner->Sync().ok());
+  owner.reset();
+  EXPECT_EQ(ReadFile(path_), "still-owned");
+}
+
+#if defined(__linux__)
+TEST_F(PosixWritableFileTest, FailedCloseCannotCloseAReusedDescriptorOnDestruction) {
+  PosixEnv env;
+  WritableFile* result = nullptr;
+  const Status status = env.NewWritableFile(path_, &result);
+  std::unique_ptr<WritableFile> file(result);
+  ASSERT_TRUE(status.ok());
+
+  // 对真实文件注入 EBADF：识别其句柄并使内核将它释放，模拟 close 失败。
+  struct stat expected;
+  ASSERT_EQ(::stat(path_.c_str(), &expected), 0);
+  auto close_dir = [](DIR* dir) { ::closedir(dir); };
+  std::unique_ptr<DIR, decltype(close_dir)> directory(::opendir("/proc/self/fd"), close_dir);
+  ASSERT_NE(directory, nullptr);
+  int file_fd = -1;
+  while (dirent* entry = ::readdir(directory.get())) {
+    char* end = nullptr;
+    const long candidate = std::strtol(entry->d_name, &end, 10);
+    if (*end != '\0' || candidate < 0 || candidate > std::numeric_limits<int>::max()) continue;
+    struct stat actual;
+    if (::fstat(static_cast<int>(candidate), &actual) == 0 &&
+        actual.st_dev == expected.st_dev && actual.st_ino == expected.st_ino) {
+      file_fd = static_cast<int>(candidate);
+      break;
+    }
+  }
+  directory.reset();
+  ASSERT_GE(file_fd, 0);
+  ASSERT_EQ(::close(file_fd), 0);
+  EXPECT_TRUE(file->Close().IsIOError());
+
+  const int replacement = ::open("/dev/null", O_RDONLY);
+  ASSERT_GE(replacement, 0);
+  EXPECT_EQ(replacement, file_fd);
+  file.reset();
+  EXPECT_NE(::fcntl(replacement, F_GETFD), -1);
+  ::close(replacement);
+}
+#endif
+
 TEST(PosixWritableFileFactoryTest, MissingParentDirectoryReturnsNotFoundAndNoFile) {
   std::string missing_parent = CreateTemporaryPath();
   ASSERT_FALSE(missing_parent.empty());
   ASSERT_EQ(::unlink(missing_parent.c_str()), 0);
 
   PosixEnv env;
-  std::unique_ptr<WritableFile> file;
+  WritableFile* result = nullptr;
   const Status status =
-      env.NewWritableFile(missing_parent + "/wal", &file);
+      env.NewWritableFile(missing_parent + "/wal", &result);
+  std::unique_ptr<WritableFile> file(result);
 
   EXPECT_TRUE(status.IsNotFound());
   EXPECT_EQ(file, nullptr);
@@ -151,8 +230,10 @@ TEST_F(PosixSequentialFileTest, ReadsSequentiallyAndReturnsShortReadAtEnd) {
   ASSERT_TRUE(WriteFile(path_, "abcdef"));
 
   PosixEnv env;
-  std::unique_ptr<SequentialFile> file;
-  ASSERT_TRUE(env.NewSequentialFile(path_, &file).ok());
+  SequentialFile* created = nullptr;
+  const Status status = env.NewSequentialFile(path_, &created);
+  std::unique_ptr<SequentialFile> file(created);
+  ASSERT_TRUE(status.ok());
   ASSERT_NE(file, nullptr);
 
   std::array<char, 4> scratch{};
@@ -168,12 +249,47 @@ TEST_F(PosixSequentialFileTest, ReadsSequentiallyAndReturnsShortReadAtEnd) {
   EXPECT_TRUE(result.empty());
 }
 
+TEST_F(PosixSequentialFileTest, RawFactoryTransfersReadableObjectToCaller) {
+  ASSERT_TRUE(WriteFile(path_, std::string("a\0b", 3)));
+  PosixEnv posix_env;
+  Env* env = &posix_env;
+  SequentialFile* result = nullptr;
+  const Status status = env->NewSequentialFile(path_, &result);
+  std::unique_ptr<SequentialFile> file(result);
+  ASSERT_TRUE(status.ok());
+  ASSERT_NE(result, nullptr);
+  std::array<char, 3> scratch{};
+  Slice read;
+  ASSERT_TRUE(result->Read(scratch.size(), &read, scratch.data()).ok());
+  file.reset();
+  EXPECT_EQ(read.ToString(), std::string("a\0b", 3));
+}
+
+TEST_F(PosixSequentialFileTest, RawFactoryFailureClearsOutputWithoutDeletingPriorObject) {
+  ASSERT_TRUE(WriteFile(path_, "abc"));
+  PosixEnv env;
+  SequentialFile* original = nullptr;
+  const Status created = env.NewSequentialFile(path_, &original);
+  std::unique_ptr<SequentialFile> owner(original);
+  ASSERT_TRUE(created.ok());
+  SequentialFile* output = original;  // 只借用原对象；owner 保留所有权。
+  const Status failed = env.NewSequentialFile(path_ + "/child", &output);
+  EXPECT_TRUE(failed.IsIOError());
+  EXPECT_EQ(output, nullptr);
+  std::array<char, 3> scratch{};
+  Slice read;
+  ASSERT_TRUE(owner->Read(scratch.size(), &read, scratch.data()).ok());
+  EXPECT_EQ(read.ToString(), "abc");
+}
+
 TEST_F(PosixSequentialFileTest, SkipChangesReadOffsetAndMayPassEndOfFile) {
   ASSERT_TRUE(WriteFile(path_, "abcdef"));
 
   PosixEnv env;
-  std::unique_ptr<SequentialFile> file;
-  ASSERT_TRUE(env.NewSequentialFile(path_, &file).ok());
+  SequentialFile* created = nullptr;
+  const Status status = env.NewSequentialFile(path_, &created);
+  std::unique_ptr<SequentialFile> file(created);
+  ASSERT_TRUE(status.ok());
   ASSERT_NE(file, nullptr);
   ASSERT_TRUE(file->Skip(2).ok());
 
@@ -192,8 +308,10 @@ TEST_F(PosixSequentialFileTest,
   ASSERT_TRUE(WriteFile(path_, "abcdef"));
 
   PosixEnv env;
-  std::unique_ptr<SequentialFile> file;
-  ASSERT_TRUE(env.NewSequentialFile(path_, &file).ok());
+  SequentialFile* created = nullptr;
+  const Status status = env.NewSequentialFile(path_, &created);
+  std::unique_ptr<SequentialFile> file(created);
+  ASSERT_TRUE(status.ok());
   ASSERT_NE(file, nullptr);
 
   std::array<char, 2> scratch{};
@@ -214,8 +332,9 @@ TEST(PosixSequentialFileFactoryTest, MissingFileReturnsNotFoundAndNoFile) {
   ASSERT_EQ(::unlink(missing_path.c_str()), 0);
 
   PosixEnv env;
-  std::unique_ptr<SequentialFile> file;
-  const Status status = env.NewSequentialFile(missing_path, &file);
+  SequentialFile* created = nullptr;
+  const Status status = env.NewSequentialFile(missing_path, &created);
+  std::unique_ptr<SequentialFile> file(created);
 
   EXPECT_TRUE(status.IsNotFound());
   EXPECT_EQ(file, nullptr);

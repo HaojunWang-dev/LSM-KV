@@ -41,6 +41,9 @@ namespace LSMKV {
         const int align = (sizeof(void*) > 8) ? sizeof(void*) : 8;
         static_assert((align & (align - 1)) == 0, "Pointer should be a power of 2");
 
+        //当align是2的幂时
+        //x % 8 == x & 7
+        //x % 16 == x & 15
         size_t current_mod = reinterpret_cast<uintptr_t>(alloc_ptr_) & (align - 1);
         size_t slop = ((current_mod == 0) ? 0 : align - current_mod);
         size_t needed = bytes + slop;

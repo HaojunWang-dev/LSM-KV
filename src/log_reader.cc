@@ -90,9 +90,8 @@ bool Reader::ReadRecord(Slice *record, std::string *scratch) {
         record_type <= RecordType::kLastType;
     const std::uint64_t physical_record_offset =
         is_disk_record_type
-            ? end_of_buffer_offset_ - buffer_.size() - kHeaderSize -
-                  fragment.size()
-            : 0;
+        ? end_of_buffer_offset_ - buffer_.size() - kHeaderSize - fragment.size()
+        : 0;
 
     if (resyncing_) {
       // 跳过恢复位置之前遗留的分片。

@@ -8,7 +8,7 @@
 
 #include "db.h"
 #include "env.h"
-#include "internal_key.h"
+#include "format.h"
 #include "log_writer.h"
 #include "memtable.h"
 #include "slice.h"

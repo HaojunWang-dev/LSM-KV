@@ -5,8 +5,7 @@
 
 #include "arena.h"
 #include "skiplist.h"
-#include "internal_key.h"
-#include "lookup_key.h"
+#include "format.h"
 #include "slice.h"
 
 namespace LSMKV {
@@ -16,7 +15,11 @@ class MemTable {
 private:
     // SkipList 保存 entry 地址；比较时先解码 entry 中的 InternalKey。
     struct KeyComparator {
+        explicit KeyComparator(const Comparator* user_comparator)
+            : internal_comparator(user_comparator) {}
+
         int operator()(const char* a, const char* b) const;
+        InternalKeyComparator internal_comparator;
     };
 
     using Table = SkipList<const char*, KeyComparator>;
@@ -30,6 +33,9 @@ public:
     };
 
     MemTable();
+    // 借用非空 user_comparator，其生命周期必须覆盖本表及全部 iterator。
+    // 比较规则必须稳定且线程安全；仍然仅支持单写线程。
+    explicit MemTable(const Comparator* user_comparator);
 
     MemTable(const MemTable&) = delete;
     MemTable& operator=(const MemTable&) = delete;

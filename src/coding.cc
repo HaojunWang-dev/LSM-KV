@@ -93,9 +93,12 @@ const char* GetVarint32PtrFallback(const char* p, const char* limit,
     for (uint32_t shift = 0; shift <= 28 && p < limit; shift += 7) {
         const uint32_t byte = static_cast<unsigned char>(*p++);
         if ((byte & 0x80U) == 0) {
+
+            //合法性检查，uint32_t 溢出检查
             if (shift == 28 && byte > 0x0fU) {
                 return nullptr;
             }
+
             *value = result | (byte << shift);
             return p;
         }

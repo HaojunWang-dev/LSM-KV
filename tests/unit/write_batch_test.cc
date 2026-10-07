@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "coding.h"
-#include "lookup_key.h"
+#include "format.h"
 #include "memtable.h"
 #include "write_batch.h"
 #include "write_batch_internal.h"

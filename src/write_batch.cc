@@ -1,6 +1,6 @@
 #include "write_batch.h"
 #include "coding.h"
-#include "internal_key.h"
+#include "format.h"
 #include "memtable.h"
 #include "status.h"
 #include "write_batch_internal.h"

@@ -90,10 +90,12 @@ public:
   Status Close() override {
     Status status = FlushBuffer();
     const int close_result = ::close(fd_);
-    if (close_result < 0 && status.ok()) {
-      return PosixError(filename_, errno);
-    }
+    const int close_error = errno;
+    // close 即使报告错误也可能已释放句柄，不能让析构重试并误关复用后的 fd。
     fd_ = -1;
+    if (close_result < 0 && status.ok()) {
+      return PosixError(filename_, close_error);
+    }
     return status;
   }
 
@@ -222,8 +224,9 @@ private:
 } // namespace
 
 Status PosixEnv::NewWritableFile(const std::string &filename,
-                                 std::unique_ptr<WritableFile> *result) {
-  assert(result != nullptr && *result == nullptr);
+                                 WritableFile** result) {
+  assert(result != nullptr);
+  *result = nullptr;
 
   const int fd = ::open(filename.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0664);
 
@@ -231,14 +234,21 @@ Status PosixEnv::NewWritableFile(const std::string &filename,
     return PosixError(filename, errno);
   }
 
-  *result = std::make_unique<PosixWritableFile>(filename, fd);
+  // 在对象构造完成前临时拥有 fd；构造抛出异常时仍能释放资源。
+  struct CloseOnFailure {
+    int fd;
+    ~CloseOnFailure() { if (fd >= 0) ::close(fd); }
+  } descriptor{fd};
+  *result = new PosixWritableFile(filename, fd);
+  descriptor.fd = -1;  // fd 的所有权已随文件对象交给调用方。
   return Status::OK();
 }
 
 
-Status PosixEnv::NewSequentialFile(const std::string &filename, std::unique_ptr<SequentialFile> *result)
+Status PosixEnv::NewSequentialFile(const std::string &filename, SequentialFile** result)
 {
-  assert(result != nullptr && *result == nullptr);
+  assert(result != nullptr);
+  *result = nullptr;
 
   const int fd = ::open(filename.c_str(), O_RDONLY, 0664);
 
@@ -246,7 +256,13 @@ Status PosixEnv::NewSequentialFile(const std::string &filename, std::unique_ptr<
     return PosixError(filename, errno);
   }
 
-  *result = std::make_unique<PosixSequentialFile> (filename, fd);
+  // 分配或构造失败时关闭 fd，成功后由返回的文件对象接管。
+  struct CloseOnFailure {
+    int fd;
+    ~CloseOnFailure() { if (fd >= 0) ::close(fd); }
+  } descriptor{fd};
+  *result = new PosixSequentialFile(filename, fd);
+  descriptor.fd = -1;
   return Status::OK();
 }
 
@@ -269,6 +285,51 @@ Status PosixEnv::CreateDir(const std::string& dirname) {
   if (::mkdir(dirname.c_str(), 0755) != 0) {
     return PosixError(dirname, errno);
   }
+  return Status::OK();
+}
+
+Status PosixEnv::RenameFile(const std::string& source, const std::string& target) {
+  if (source.find('\0') != std::string::npos ||
+      target.find('\0') != std::string::npos) {
+    return Status::InvalidArgument("RenameFile", "path contains NUL");
+  }
+  if (::rename(source.c_str(), target.c_str()) != 0) {
+    const int rename_error = errno;
+    return PosixError(source + " -> " + target, rename_error);
+  }
+  return Status::OK();
+}
+
+Status PosixEnv::RemoveFile(const std::string& filename) {
+  if (filename.find('\0') != std::string::npos) {
+    return Status::InvalidArgument("RemoveFile", "path contains NUL");
+  }
+  if (::unlink(filename.c_str()) != 0) {
+    return PosixError(filename, errno);
+  }
+  return Status::OK();
+}
+
+Status PosixEnv::SyncDir(const std::string& dirname) {
+  if (dirname.find('\0') != std::string::npos) {
+    return Status::InvalidArgument("SyncDir", "path contains NUL");
+  }
+  int fd;
+  do {
+    fd = ::open(dirname.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  } while (fd < 0 && errno == EINTR);
+  if (fd < 0) return PosixError(dirname, errno);
+
+  int sync_result;
+  do {
+    sync_result = ::fsync(fd);
+  } while (sync_result != 0 && errno == EINTR);
+  const int sync_error = sync_result == 0 ? 0 : errno;
+  // 无论 fsync 是否成功都释放句柄；close 出错后不重试已可能释放的 fd。
+  const int close_result = ::close(fd);
+  const int close_error = close_result == 0 ? 0 : errno;
+  if (sync_error != 0) return PosixError(dirname, sync_error);
+  if (close_error != 0) return PosixError(dirname, close_error);
   return Status::OK();
 }
 

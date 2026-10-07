@@ -4,9 +4,10 @@
 #include <string>
 #include <vector>
 
-#include "internal_key.h"
-#include "lookup_key.h"
+#include "coding.h"
+#include "format.h"
 #include "memtable.h"
+#include "comparator_test_helpers.h"
 
 namespace LSMKV {
 namespace {
@@ -37,7 +38,7 @@ TEST(MemTableTest, IteratorSeekFindsNewestVersionVisibleToSnapshot) {
 
     LookupKey lookup(StringSlice(key), 25);
     MemTable::Iterator iterator(&table);
-    iterator.Seek(lookup.InternalKey());
+    iterator.Seek(lookup.internal_key());
 
     ASSERT_TRUE(iterator.Valid());
     EXPECT_EQ(ExtractUserKey(iterator.key()).ToString(), key);
@@ -179,6 +180,67 @@ TEST(MemTableTest, IteratorTraversesEveryVersionInInternalKeyOrder) {
 
     EXPECT_EQ(entries,
               (std::vector<std::string>{"apple@20", "apple@10", "banana@5"}));
+}
+
+TEST(MemTableTest, CustomComparatorControlsIterationAndSeek) {
+    test::ReverseBytewiseComparator comparator;
+    MemTable table(&comparator);
+    table.Add(10, ValueType::kValue, Slice("apple"), Slice("a10"));
+    table.Add(20, ValueType::kValue, Slice("banana"), Slice("b20"));
+    table.Add(10, ValueType::kValue, Slice("banana"), Slice("b10"));
+    MemTable::Iterator iterator(&table);
+    std::vector<std::string> keys;
+    for (iterator.SeekToFirst(); iterator.Valid(); iterator.Next()) {
+        keys.push_back(ExtractUserKey(iterator.key()).ToString() + "@" +
+                       std::to_string(SequenceFromInternalKey(iterator.key())));
+    }
+    EXPECT_EQ(keys, (std::vector<std::string>{"banana@20", "banana@10", "apple@10"}));
+
+    iterator.Seek(LookupKey(Slice("banana"), 15).internal_key());
+    ASSERT_TRUE(iterator.Valid());
+    EXPECT_EQ(iterator.value().ToString(), "b10");
+    std::string value = "unchanged";
+    EXPECT_EQ(table.Get(LookupKey(Slice("avocado"), 30), &value),
+              MemTable::GetResult::kNotFound);
+    EXPECT_EQ(value, "unchanged");
+}
+
+TEST(MemTableTest, EquivalentUserKeysShareSnapshotAndTombstoneVisibility) {
+    test::AsciiCaseInsensitiveComparator comparator;
+    MemTable table(&comparator);
+    table.Add(10, ValueType::kValue, Slice("Apple"), Slice("old"));
+    table.Add(20, ValueType::kDeletion, Slice("APPLE"), Slice());
+    table.Add(30, ValueType::kValue, Slice("apple"), Slice("new"));
+    std::string value;
+    EXPECT_EQ(table.Get(LookupKey(Slice("aPpLe"), 5), &value),
+              MemTable::GetResult::kNotFound);
+    EXPECT_EQ(table.Get(LookupKey(Slice("aPpLe"), 15), &value),
+              MemTable::GetResult::kFound);
+    EXPECT_EQ(value, "old");
+    value = "unchanged";
+    EXPECT_EQ(table.Get(LookupKey(Slice("aPpLe"), 25), &value),
+              MemTable::GetResult::kDeleted);
+    EXPECT_EQ(value, "unchanged");
+    EXPECT_EQ(table.Get(LookupKey(Slice("aPpLe"), 35), &value),
+              MemTable::GetResult::kFound);
+    EXPECT_EQ(value, "new");
+}
+
+TEST(MemTableTest, CustomComparatorKeepsBinaryKeysAndMissingKeysDistinct) {
+    test::AsciiCaseInsensitiveComparator comparator;
+    MemTable table(&comparator);
+    table.Add(1, ValueType::kValue, Slice("A\0B", 3), Slice("binary"));
+    table.Add(1, ValueType::kValue, Slice(), Slice("empty"));
+    std::string value;
+    EXPECT_EQ(table.Get(LookupKey(Slice("a\0b", 3), 1), &value),
+              MemTable::GetResult::kFound);
+    EXPECT_EQ(value, "binary");
+    EXPECT_EQ(table.Get(LookupKey(Slice(), 1), &value), MemTable::GetResult::kFound);
+    EXPECT_EQ(value, "empty");
+    value = "unchanged";
+    EXPECT_EQ(table.Get(LookupKey(Slice("a", 1), 1), &value),
+              MemTable::GetResult::kNotFound);
+    EXPECT_EQ(value, "unchanged");
 }
 
 }  // namespace

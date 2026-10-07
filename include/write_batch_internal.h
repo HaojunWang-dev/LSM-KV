@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-#include "internal_key.h"
+#include "format.h"
 #include "status.h"
 #include "write_batch.h"
 

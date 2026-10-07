@@ -39,18 +39,25 @@ class RecordingWritableFile final : public WritableFile {
 class RecordingEnv final : public Env {
  public:
   Status NewWritableFile(const std::string&,
-                         std::unique_ptr<WritableFile>*) override {
-    return Status::OK();
+                         WritableFile** result) override {
+    *result = nullptr;
+    return Status::NotSupported("unused");
   }
   Status NewSequentialFile(const std::string&,
-                           std::unique_ptr<SequentialFile>*) override {
-    return Status::OK();
+                           SequentialFile** result) override {
+    *result = nullptr;
+    return Status::NotSupported("unused");
   }
   Status FileExists(const std::string&, bool* exists) override {
     *exists = true;
     return Status::OK();
   }
   Status CreateDir(const std::string&) override { return Status::OK(); }
+  Status RenameFile(const std::string&, const std::string&) override {
+    return Status::NotSupported("unused");
+  }
+  Status RemoveFile(const std::string&) override { return Status::NotSupported("unused"); }
+  Status SyncDir(const std::string&) override { return Status::NotSupported("unused"); }
 };
 
 TEST(EnvTest, FileExistsUsesStatusAndOutputParameter) {
