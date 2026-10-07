@@ -319,6 +319,14 @@ TEST_F(PosixFileManagementTest, CurrentReplacementWritesOnlyManifestBasenameAndN
   EXPECT_FALSE(exists);
 }
 
+TEST_F(PosixFileManagementTest, ReadsCurrentThroughGeneratedFileName) {
+  ASSERT_NO_FATAL_FAILURE(Put("CURRENT", "MANIFEST-000007\n"));
+  std::string current = "stale bytes";
+  const Status status = ReadFileToString(&env_, CurrentFileName(path_), &current);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+  EXPECT_EQ(current, "MANIFEST-000007\n");
+}
+
 #ifndef NDEBUG
 TEST(FilenameDeathTest, NumberedGeneratorsRequireNonzeroNumbers) {
   using Generator = std::string (*)(const std::string&, uint64_t);

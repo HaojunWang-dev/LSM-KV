@@ -91,6 +91,31 @@ class PosixSequentialFileTest : public ::testing::Test {
   std::string path_;
 };
 
+TEST_F(PosixSequentialFileTest, ReadFileToStringReadsWholeBinaryFileAcrossBuffers) {
+  PosixEnv env;
+  for (size_t size : {size_t{0}, size_t{8192}, size_t{10003}}) {
+    SCOPED_TRACE(size);
+    std::string contents(size, 'x');
+    if (size != 0) {
+      contents[0] = '\0';
+      contents[4096] = '\0';
+      contents.back() = 'z';
+    }
+    ASSERT_TRUE(WriteFile(path_, contents));
+    std::string output = "stale bytes";
+    const Status status = ReadFileToString(&env, path_, &output);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ(output, contents);
+  }
+}
+
+TEST_F(PosixSequentialFileTest, ReadFileToStringReportsMissingFile) {
+  PosixEnv env;
+  std::string output = "stale bytes";
+  EXPECT_TRUE(ReadFileToString(&env, path_ + "-missing", &output).IsNotFound());
+  EXPECT_TRUE(output.empty());
+}
+
 TEST_F(PosixWritableFileTest, FactoryTruncatesExistingFileAndFlushesAppendedData) {
   ASSERT_TRUE(WriteFile(path_, "stale-wal-data"));
 
@@ -153,6 +178,66 @@ TEST_F(PosixWritableFileTest, RawFactoryTransfersOwnershipToCaller) {
   ASSERT_TRUE(result->Sync().ok());
   file.reset();
   EXPECT_EQ(ReadFile(path_), "caller-owned");
+}
+
+TEST_F(PosixWritableFileTest, AppendableFilePreservesExistingBinaryContents) {
+  ASSERT_TRUE(WriteFile(path_, std::string("old\0", 4)));
+  PosixEnv posix;
+  Env* env = &posix;
+  WritableFile* result = nullptr;
+  ASSERT_TRUE(env->NewAppendableFile(path_, &result).ok());
+  std::unique_ptr<WritableFile> file(result);
+  ASSERT_NE(file, nullptr);
+  EXPECT_EQ(ReadFile(path_), std::string("old\0", 4));
+  ASSERT_TRUE(file->Append(Slice("new\0", 4)).ok());
+  ASSERT_TRUE(file->Sync().ok());
+  ASSERT_TRUE(file->Close().ok());
+  EXPECT_EQ(ReadFile(path_), std::string("old\0new\0", 8));
+  uint64_t size = 999;
+  ASSERT_TRUE(env->GetFileSize(path_, &size).ok());
+  EXPECT_EQ(size, 8U);
+}
+
+TEST_F(PosixWritableFileTest, AppendableFileCreatesMissingFileWithoutTruncation) {
+  ASSERT_EQ(::unlink(path_.c_str()), 0);
+  PosixEnv env;
+  WritableFile* result = nullptr;
+  ASSERT_TRUE(env.NewAppendableFile(path_, &result).ok());
+  std::unique_ptr<WritableFile> file(result);
+  ASSERT_NE(file, nullptr);
+  ASSERT_TRUE(file->Append(Slice("created")).ok());
+  ASSERT_TRUE(file->Close().ok());
+  EXPECT_EQ(ReadFile(path_), "created");
+}
+
+TEST_F(PosixWritableFileTest, AppendableFailureClearsOutputWithoutDeletingOldObject) {
+  PosixEnv env;
+  WritableFile* original = nullptr;
+  ASSERT_TRUE(env.NewWritableFile(path_, &original).ok());
+  std::unique_ptr<WritableFile> owner(original);
+  WritableFile* output = original;
+  EXPECT_TRUE(env.NewAppendableFile(path_ + "/child", &output).IsIOError());
+  EXPECT_EQ(output, nullptr);
+  ASSERT_TRUE(owner->Append(Slice("still-owned")).ok());
+  ASSERT_TRUE(owner->Sync().ok());
+  EXPECT_EQ(ReadFile(path_), "still-owned");
+}
+
+TEST_F(PosixWritableFileTest, NewFileInterfacesRejectNullOutputsAndNulPaths) {
+  PosixEnv env;
+  ASSERT_TRUE(WriteFile(path_, "unchanged"));
+  EXPECT_TRUE(env.NewAppendableFile(path_, nullptr).IsInvalidArgument());
+  EXPECT_TRUE(env.GetFileSize(path_, nullptr).IsInvalidArgument());
+  WritableFile* file = nullptr;
+  const std::string bad_path = path_ + std::string("\0suffix", 7);
+  EXPECT_TRUE(env.NewAppendableFile(bad_path, &file).IsInvalidArgument());
+  EXPECT_EQ(file, nullptr);
+  uint64_t size = 999;
+  EXPECT_TRUE(env.GetFileSize(bad_path, &size).IsInvalidArgument());
+  EXPECT_EQ(size, 0U);
+  EXPECT_TRUE(env.GetFileSize(path_ + "-missing", &size).IsNotFound());
+  EXPECT_EQ(size, 0U);
+  EXPECT_EQ(ReadFile(path_), "unchanged");
 }
 
 TEST_F(PosixWritableFileTest, RawFactoryFailureClearsOutputWithoutDeletingPriorObject) {

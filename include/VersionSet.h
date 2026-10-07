@@ -118,6 +118,8 @@ public:
 
     Status LogAndApply(VersionEdit* edit, std::mutex* mu);
 
+    Status Recover(bool* save_manifest);
+    
     // 返回借用的当前版本；跨版本切换继续使用时，调用方须 Ref()/Unref()。
     Version* current() { return current_; }
 
@@ -156,9 +158,16 @@ private:
     friend class Compaction;
     friend class VersionSetTestPeer;
 
+    // 只更新 v 的评分与候选层级；不安装版本、不执行 I/O 或实际 compaction。
+    // 借用所属本 VersionSet 的 v，调用方须同步对它的访问。
     void Finalize(Version* v);
 
     Status WriteSnapshot(log::Writer* log);
+
+    // 恢复后尝试追加使用原 MANIFEST；成功才安装文件、Writer 和文件编号。
+    // descriptor_file/log 必须为空；调用方须独占该数据库目录的修改。
+    // 失败返回 false 且不改变本对象或原文件，Recover 随后请求写新 MANIFEST。
+    bool ReuseManifest(const std::string& dscname, const std::string& dscbase);
 
     // 安装已验证的新版本，维护版本链表和 current_ 的引用；不负责持久化。
     void AppendVersion(Version* version);

@@ -2,13 +2,16 @@
 
 #include "VersionEdit.h"
 #include "coding.h"
+#include "crc32c.h"
 #include "comparator.h"
 #include "env.h"
 #include "filename.h"
 #include "format.h"
 #include "iterator.h"
 #include "log_writer.h"
+#include "logging.h"
 #include "options.h"
+#include "log_reader.h"
 
 #include <algorithm>
 #include <cassert>
@@ -548,6 +551,50 @@ void VersionSet::AddLiveFiles(std::set<uint64_t>* live) {
   }
 }
 
+namespace {
+
+// L1 的目标容量为 10 MiB，每往下一层扩大十倍。
+double MaxBytesForLevel(int level) {
+  assert(level > 0 && level < config::kNumLevels);
+  double limit = 10.0 * 1024 * 1024;
+  for (int current = 1; current < level; ++current) {
+    limit *= 10;
+  }
+  return limit;
+}
+
+}  // namespace
+
+void VersionSet::Finalize(Version* v) {
+  assert(v != nullptr && v->vset_ == this);
+  double best_score = -1;
+  int best_level = -1;
+
+  // 最高层没有下一个输出层，因此不参与候选评分。
+  for (int level = 0; level < config::kNumLevels - 1; ++level) {
+    double score;
+    if (level == 0) {
+      // L0 文件允许重叠，文件数量比总字节数更直接反映读取开销。
+      score = static_cast<double>(v->files_[level].size()) /
+              config::kL0_CompactionTrigger;
+    } else {
+      // 评分是近似值；以 double 累加，避免巨大文件集合使整数总量回绕。
+      double total_bytes = 0;
+      for (const FileMetaData* file : v->files_[level]) {
+        total_bytes += static_cast<double>(file->file_size);
+      }
+      score = total_bytes / MaxBytesForLevel(level);
+    }
+    if (score > best_score) {
+      best_score = score;
+      best_level = level;
+    }
+  }
+
+  v->compaction_score_ = best_score;
+  v->compaction_level_ = best_level;
+}
+
 Status VersionSet::WriteSnapshot(log::Writer* log) {
   VersionEdit edit;
 
@@ -647,6 +694,230 @@ Status VersionSet::LogAndApply(VersionEdit* edit, std::mutex* mu)
     }
   }
 
+  return s;
+}
+
+namespace {
+
+// Reader 允许 EOF 残片用于崩溃恢复，但其后不能直接追加。复用要求物理记录
+// 和逻辑分片均完整；这里只检查日志封装，VersionEdit 语义已由 Recover 校验。
+bool HasCompleteManifestRecords(const std::string& contents) {
+  size_t offset = 0;
+  bool fragmented = false;
+  bool have_record = false;
+  while (offset < contents.size()) {
+    const size_t block_left = log::kBlockSize - offset % log::kBlockSize;
+    const size_t available = contents.size() - offset;
+    if (block_left < log::kHeaderSize) {
+      const size_t padding = std::min(block_left, available);
+      for (size_t i = 0; i < padding; ++i) {
+        if (contents[offset + i] != '\0') return false;
+      }
+      offset += padding;
+      continue;
+    }
+    if (available < log::kHeaderSize) return false;
+    const char* header = contents.data() + offset;
+    const size_t length = static_cast<unsigned char>(header[4]) |
+                          (static_cast<size_t>(static_cast<unsigned char>(header[5])) << 8);
+    if (length > block_left - log::kHeaderSize ||
+        length > available - log::kHeaderSize) return false;
+    if (crc32c::Unmask(DecodeFixed32(header)) !=
+        crc32c::Value(header + 6, length + 1)) return false;
+    switch (static_cast<log::RecordType>(static_cast<unsigned char>(header[6]))) {
+      case log::RecordType::kFullType:
+        if (fragmented) return false;
+        have_record = true;
+        break;
+      case log::RecordType::kFirstType:
+        if (fragmented) return false;
+        fragmented = true;
+        break;
+      case log::RecordType::kMiddleType:
+        if (!fragmented) return false;
+        break;
+      case log::RecordType::kLastType:
+        if (!fragmented) return false;
+        fragmented = false;
+        have_record = true;
+        break;
+      default:
+        return false;
+    }
+    offset += log::kHeaderSize + length;
+  }
+  return have_record && !fragmented;
+}
+
+}  // namespace
+
+bool VersionSet::ReuseManifest(const std::string& dscname,
+                               const std::string& dscbase) {
+  if (!options_->reuse_logs || descriptor_file_ != nullptr ||
+      descriptor_log_ != nullptr) return false;
+
+  uint64_t number;
+  FileType type;
+  if (!ParseFileName(dscbase, &number, &type) ||
+      type != FileType::kDescriptorFile || number == 0 ||
+      number >= next_file_number_ || dscname != dbname_ + "/" + dscbase) return false;
+
+  uint64_t file_size = 0;
+  Status status = env_->GetFileSize(dscname, &file_size);
+  if (!status.ok() || file_size >= options_->max_file_size) return false;
+  std::string contents;
+  status = ReadFileToString(env_, dscname, &contents);
+  if (!status.ok() || contents.size() != file_size ||
+      !HasCompleteManifestRecords(contents)) return false;
+
+  WritableFile* result = nullptr;
+  status = env_->NewAppendableFile(dscname, &result);
+  std::unique_ptr<WritableFile> file(result);
+  if (status.ok() && file == nullptr) {
+    status = Status::IOError(dscname, "Env returned a null WritableFile");
+  }
+  if (!status.ok()) {
+    Log(options_->info_log, "Cannot reuse MANIFEST %s: %s",
+        dscname.c_str(), status.ToString().c_str());
+    return false;
+  }
+  auto writer = std::make_unique<log::Writer>(file.get(), file_size);
+  descriptor_file_ = file.release();
+  descriptor_log_ = writer.release();
+  manifest_file_number_ = number;
+  return true;
+}
+
+Status VersionSet::Recover(bool* save_manifest) {
+  struct LogReporter : public log::Reader::Reporter {
+    Status* status;
+
+    void Corruption(size_t bytes, const Status& s) override {
+      if (this->status->ok()) {
+        *this->status = s;
+      }
+    }
+  };
+
+  std::string current;
+  Status s = ReadFileToString(env_, CurrentFileName(dbname_), &current);
+  if (!s.ok()) {
+    return s;
+  }
+  if (current.empty() || current[current.size() - 1] != '\n') {
+    return Status::Corruption("Current file does not end with newline");
+  }
+  current.resize(current.size() - 1);
+
+  std::string dscname = dbname_ + "/" + current;
+
+  SequentialFile* file;
+  s = env_->NewSequentialFile(dscname, &file);
+  if (!s.ok()) {
+    if (s.IsNotFound()) {
+      return Status::Corruption("Current points to a non_existent file", s.ToString());
+    }
+
+    return s;
+  }
+
+  bool have_log_number = false;
+  bool have_prev_log_number = false;
+  bool have_next_file = false;
+  bool have_last_sequence = false;
+  uint64_t next_file = 0;
+  uint64_t last_sequence = 0;
+  uint64_t log_number = 0;
+  uint64_t prev_log_number = 0;
+  Builder builder(this, current_);
+  int read_records = 0;
+
+  {
+    LogReporter reporter;
+    reporter.status = &s;
+    log::Reader reader(file, &reporter, true, 0);
+
+    Slice record;
+    std::string scratch;
+    while (reader.ReadRecord(&record, &scratch) && s.ok()) {
+      ++read_records;
+      VersionEdit edit;
+      s = edit.DecodeFrom(record);
+      if (s.ok()) {
+        if (edit.has_comparator_ && edit.comparator_ != icmp_.user_comparator()->Name()) {
+          s = Status::InvalidArgument(edit.comparator_ + "does not matching exiting comparator" + icmp_.user_comparator()->Name());
+        }
+      }
+      if (s.ok()) {
+        builder.Apply(&edit);
+      }
+
+      if (edit.has_log_number_) {
+        log_number = edit.log_number_;
+        have_log_number = true;
+      }
+
+      if (edit.has_prev_log_number_) {
+        prev_log_number = edit.prev_log_number_;
+        have_prev_log_number = true;
+      }
+
+      if (edit.has_next_file_number_) {
+        next_file = edit.next_file_number_;
+        have_next_file = true;
+      }
+
+      if (edit.has_last_sequence_) {
+        last_sequence = edit.last_sequence_;
+        have_last_sequence = true;
+      }
+    } 
+  }
+
+  delete file;
+  file = nullptr;
+
+
+  if (s.ok()) {
+    if (!have_next_file) {
+      s = Status::Corruption("no meta-nextfile entry in descriptor");
+    } else if (!have_log_number) {
+      s = Status::Corruption("no meta-lognumber entry in descriptor");
+    } else if (!have_last_sequence) {
+      s = Status::Corruption("no last-sequence-number entry in descriptor");
+    }
+
+    if (!have_prev_log_number) {
+      prev_log_number = 0;
+    }
+
+    MarkFileNumberUsed(prev_log_number);
+    MarkFileNumberUsed(log_number);
+  }
+
+  if (s.ok()) {
+    Version* v = new Version(this);
+    builder.SaveTo(v);
+    // Install recovered version
+    Finalize(v);
+    AppendVersion(v);
+    manifest_file_number_ = next_file;
+    next_file_number_ = next_file + 1;
+    last_sequence_ = last_sequence;
+    log_number_ = log_number;
+    prev_log_number_ = prev_log_number;
+
+    // See if we can reuse the existing MANIFEST file.
+    if (ReuseManifest(dscname, current)) {
+      // No need to save new manifest
+    } else {
+      *save_manifest = true;
+    }
+  } else {
+    std::string error = s.ToString();
+    Log(options_->info_log, "Error recovering version set with %d records: %s",
+        read_records, error.c_str());
+  }
   return s;
 }
 } // namespace LSMKV

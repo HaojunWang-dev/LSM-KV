@@ -11,6 +11,19 @@
 
 namespace LSMKV {
 
+void Log(Logger* logger, const char* format, ...) {
+  if (logger == nullptr) return;
+
+  std::va_list args;
+  va_start(args, format);
+  struct Cleanup {
+    std::va_list& args;
+    ~Cleanup() { va_end(args); }
+  } cleanup{args};
+
+  logger->Logv(format, args);
+}
+
 bool ConsumeDecimalNumber(Slice *in, uint64_t *val) {
     constexpr const uint64_t kMaxInt64 = std::numeric_limits<uint64_t>::max();
     constexpr const char kLastDigitOfMaxUint64 = '0' + static_cast<char>(kMaxInt64 % 10);

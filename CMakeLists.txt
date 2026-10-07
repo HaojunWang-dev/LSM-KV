@@ -17,6 +17,7 @@ add_library(lsm_kv
     src/memtable.cc
     src/status.cc
     src/write_batch.cc
+    src/env.cc
     src/env_posix.cc
     src/log_writer.cc
     src/log_reader.cc
@@ -49,6 +50,7 @@ if(BUILD_TESTING)
         tests/unit/lookup_key_test.cc
         tests/unit/log_reader_test.cc
         tests/unit/log_writer_test.cc
+        tests/unit/logging_test.cc
         tests/unit/slice_test.cc
         tests/unit/skiplist_test.cc
         tests/unit/memtable_test.cc

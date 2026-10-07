@@ -14,6 +14,9 @@ class PosixEnv final : public Env {
  public:
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override;
+  Status NewAppendableFile(const std::string& filename,
+                          WritableFile** result) override;
+  Status GetFileSize(const std::string& filename, uint64_t* size) override;
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override;
   Status FileExists(const std::string& filename, bool* exists) override;

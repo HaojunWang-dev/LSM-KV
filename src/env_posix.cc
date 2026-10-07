@@ -266,6 +266,52 @@ Status PosixEnv::NewSequentialFile(const std::string &filename, SequentialFile**
   return Status::OK();
 }
 
+Status PosixEnv::NewAppendableFile(const std::string& filename,
+                                  WritableFile** result) {
+  if (result == nullptr) {
+    return Status::InvalidArgument("NewAppendableFile", "null output");
+  }
+  *result = nullptr;
+  if (filename.find('\0') != std::string::npos) {
+    return Status::InvalidArgument("NewAppendableFile", "path contains NUL");
+  }
+
+  int fd;
+  do {
+    fd = ::open(filename.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0664);
+  } while (fd < 0 && errno == EINTR);
+  if (fd < 0) return PosixError(filename, errno);
+
+  struct CloseOnFailure {
+    int fd;
+    ~CloseOnFailure() { if (fd >= 0) ::close(fd); }
+  } descriptor{fd};
+  *result = new PosixWritableFile(filename, fd);
+  descriptor.fd = -1;
+  return Status::OK();
+}
+
+Status PosixEnv::GetFileSize(const std::string& filename, uint64_t* size) {
+  if (size == nullptr) {
+    return Status::InvalidArgument("GetFileSize", "null output");
+  }
+  *size = 0;
+  if (filename.find('\0') != std::string::npos) {
+    return Status::InvalidArgument("GetFileSize", "path contains NUL");
+  }
+  struct stat info;
+  int result;
+  do {
+    result = ::stat(filename.c_str(), &info);
+  } while (result != 0 && errno == EINTR);
+  if (result != 0) return PosixError(filename, errno);
+  if (info.st_size < 0 || !S_ISREG(info.st_mode)) {
+    return Status::IOError(filename, "not a regular file with a valid size");
+  }
+  *size = static_cast<uint64_t>(info.st_size);
+  return Status::OK();
+}
+
 Status PosixEnv::FileExists(const std::string& filename, bool* exists) {
   assert(exists != nullptr);
 
