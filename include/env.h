@@ -4,6 +4,7 @@
 #include "status.h"
 
 #include <cstdarg>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -50,6 +51,25 @@ public:
   virtual Status Skip(uint64_t n) = 0;
 };
 
+// 按偏移读取文件；没有共享读取游标，同一实例支持并发 Read()。
+// 调用方须为各个并发读取提供独立缓冲区，并在全部读取结束后再释放对象。
+class RandomAccessFile {
+ public:
+  RandomAccessFile() = default;
+  RandomAccessFile(const RandomAccessFile&) = delete;
+  RandomAccessFile& operator=(const RandomAccessFile&) = delete;
+
+  virtual ~RandomAccessFile() = default;
+
+  // 从 offset 读取至多 n 字节。result 必须非空；n > 0 时 scratch 必须
+  // 非空且容量至少为 n。成功时 result 借用 scratch，缓冲区被覆盖前有效。
+  // 短读和 EOF 返回 OK；错误时 result 为空。n == 0 时允许 scratch 为空。
+  // POSIX 实现要求 offset / offset+n 可由 off_t 表示，n 可由 ssize_t 表示。
+  // 文件内容的并发修改需由调用方协调；不保证多个 Read() 构成一致快照。
+  virtual Status Read(uint64_t offset, size_t n, Slice* result,
+                      char* scratch) const = 0;
+};
+
 // 诊断日志接收器，不是用于恢复的 WAL；调用方负责其生命周期。
 // 实现必须支持并发 Logv()，并在调用期间消费参数，不得保存借用的参数。
 class Logger {
@@ -81,6 +101,10 @@ class Env {
   //（也可交给 RAII 管理）；失败时 *result 为 nullptr。输出槽规则同上。
   virtual Status NewSequentialFile(const std::string& filename,
                                    SequentialFile** result) = 0;
+  // 只读打开随机访问文件，不创建或截断文件；成功时由调用方拥有并 delete。
+  // 输出槽规则同 NewSequentialFile；默认实现返回 NotSupported。
+  virtual Status NewRandomAccessFile(const std::string& filename,
+                                     RandomAccessFile** result);
   virtual Status FileExists(const std::string& filename, bool* exists) = 0;
   virtual Status CreateDir(const std::string& dirname) = 0;
 

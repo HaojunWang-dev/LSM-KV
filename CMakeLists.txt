@@ -25,6 +25,7 @@ add_library(lsm_kv
     src/VersionSet.cc
     src/filename.cc
     src/logging.cc
+    src/table_format.cc
 )
 
 target_include_directories(lsm_kv
@@ -44,6 +45,7 @@ if(BUILD_TESTING)
         tests/unit/crc32c_test.cc
         tests/unit/env_test.cc
         tests/unit/env_posix_test.cc
+        tests/unit/random_access_file_test.cc
         tests/unit/filename_test.cc
         tests/unit/internal_key_test.cc
         tests/unit/iterator_test.cc

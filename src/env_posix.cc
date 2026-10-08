@@ -221,7 +221,70 @@ private:
   const std::string filename_;
 };
 
+class PosixRandomAccessFile final : public RandomAccessFile {
+ public:
+  PosixRandomAccessFile(std::string filename, int fd)
+      : fd_(fd), filename_(std::move(filename)) {}
+
+  ~PosixRandomAccessFile() override { ::close(fd_); }
+
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch) const override {
+    if (result == nullptr) {
+      return Status::InvalidArgument("RandomAccessFile::Read", "null output");
+    }
+    result->clear();
+    if (n != 0 && scratch == nullptr) {
+      return Status::InvalidArgument(filename_, "null read buffer");
+    }
+    // 在窄化为 off_t 前验证偏移、长度及半开读取区间，避免截断或加法回绕。
+    const uint64_t max_offset = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+    if (offset > max_offset || n > static_cast<size_t>(std::numeric_limits<ssize_t>::max()) ||
+        n > max_offset - offset) {
+      return Status::InvalidArgument(filename_, "read range exceeds POSIX limits");
+    }
+    if (n == 0) return Status::OK();
+
+    ssize_t bytes;
+    do {
+      bytes = ::pread(fd_, scratch, n, static_cast<off_t>(offset));
+    } while (bytes < 0 && errno == EINTR);
+    if (bytes < 0) return PosixError(filename_, errno);
+    *result = Slice(scratch, static_cast<size_t>(bytes));
+    return Status::OK();
+  }
+
+ private:
+  const int fd_;
+  const std::string filename_;
+};
+
 } // namespace
+
+Status PosixEnv::NewRandomAccessFile(const std::string& filename,
+                                    RandomAccessFile** result) {
+  if (result == nullptr) {
+    return Status::InvalidArgument("NewRandomAccessFile", "null output");
+  }
+  *result = nullptr;
+  if (filename.find('\0') != std::string::npos) {
+    return Status::InvalidArgument("NewRandomAccessFile", "path contains NUL");
+  }
+  int fd;
+  do {
+    fd = ::open(filename.c_str(), O_RDONLY | O_CLOEXEC);
+  } while (fd < 0 && errno == EINTR);
+  if (fd < 0) return PosixError(filename, errno);
+
+  // 对象分配或文件名复制抛出异常时仍释放 fd；成功后文件对象接管所有权。
+  struct CloseOnFailure {
+    int fd;
+    ~CloseOnFailure() { if (fd >= 0) ::close(fd); }
+  } descriptor{fd};
+  *result = new PosixRandomAccessFile(filename, fd);
+  descriptor.fd = -1;
+  return Status::OK();
+}
 
 Status PosixEnv::NewWritableFile(const std::string &filename,
                                  WritableFile** result) {

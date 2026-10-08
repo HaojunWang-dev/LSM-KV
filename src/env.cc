@@ -5,6 +5,14 @@
 
 namespace LSMKV {
 
+Status Env::NewRandomAccessFile(const std::string&, RandomAccessFile** result) {
+  if (result == nullptr) {
+    return Status::InvalidArgument("NewRandomAccessFile", "null output");
+  }
+  *result = nullptr;
+  return Status::NotSupported("NewRandomAccessFile");
+}
+
 Status Env::NewAppendableFile(const std::string&, WritableFile** result) {
   if (result == nullptr) {
     return Status::InvalidArgument("NewAppendableFile", "null output");

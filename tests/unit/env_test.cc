@@ -198,6 +198,32 @@ TEST(EnvTest, UnsupportedManifestReuseInterfacesClearOutputs) {
   EXPECT_TRUE(env->GetFileSize("manifest", nullptr).IsInvalidArgument());
 }
 
+class RecordingRandomAccessFile final : public RandomAccessFile {
+ public:
+  explicit RecordingRandomAccessFile(bool* destroyed) : destroyed_(destroyed) {}
+  ~RecordingRandomAccessFile() override { *destroyed_ = true; }
+  Status Read(uint64_t, size_t, Slice* result, char*) const override {
+    result->clear();
+    return Status::NotSupported("unused");
+  }
+ private:
+  bool* destroyed_;  // 借用，测试标记覆盖文件生命周期。
+};
+
+TEST(EnvTest, UnsupportedRandomAccessFactoryDoesNotTakeOwnershipOfOldOutput) {
+  RecordingEnv recording;
+  Env* env = &recording;
+  bool destroyed = false;
+  std::unique_ptr<RandomAccessFile> owner(new RecordingRandomAccessFile(&destroyed));
+  RandomAccessFile* output = owner.get();
+  EXPECT_TRUE(env->NewRandomAccessFile("table", &output).IsNotSupportedError());
+  EXPECT_EQ(output, nullptr);
+  EXPECT_FALSE(destroyed);
+  EXPECT_TRUE(env->NewRandomAccessFile("table", nullptr).IsInvalidArgument());
+  owner.reset();
+  EXPECT_TRUE(destroyed);
+}
+
 // WAL Writer 只能依赖 WritableFile 抽象，而不是某个具体的 POSIX 文件类型。
 // 该测试也确保通过基类指针销毁派生文件对象是安全的。
 TEST(EnvTest, WritableFileSupportsPolymorphicWalWriteOperations) {

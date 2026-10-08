@@ -19,6 +19,8 @@ class PosixEnv final : public Env {
   Status GetFileSize(const std::string& filename, uint64_t* size) override;
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override;
+  Status NewRandomAccessFile(const std::string& filename,
+                             RandomAccessFile** result) override;
   Status FileExists(const std::string& filename, bool* exists) override;
   Status CreateDir(const std::string& dirname) override;
   Status RenameFile(const std::string& source, const std::string& target) override;

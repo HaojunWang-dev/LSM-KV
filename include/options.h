@@ -3,8 +3,17 @@
 #include "env.h"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace LSMKV {
+
+// SSTable block trailer 中的压缩类型字节；编码值属于磁盘格式，不能重新编号。
+// 声明这些类型不代表已经提供对应的压缩或解压实现。
+enum class CompressionType : std::uint8_t {
+  kNoCompression = 0,
+  kSnappyCompression = 1,
+  kZstdCompression = 2,
+};
 
 // 数据库打开选项。
 struct Options {
