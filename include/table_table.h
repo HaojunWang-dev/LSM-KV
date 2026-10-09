@@ -52,7 +52,7 @@ public:
     ~Block();
 
     size_t size() const { return size_; }
-    Iterator* NewIterato(const Comparator* comparator);
+    Iterator* NewIterator(const Comparator* comparator);
 
 private:
     class Iter;
