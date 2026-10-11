@@ -1,11 +1,13 @@
 #include "table_format.h"
 
 #include "env.h"
-#include "log_format.h"
 #include "options.h"
 #include "coding.h"
 #include "crc32c.h"
+#include <cassert>
 #include <cstdint>
+#include <limits>
+#include <memory>
 
 namespace LSMKV {
 
@@ -18,23 +20,26 @@ void BlockHandle::EncodeTo(std::string* dst) const{
 }
 
 Status BlockHandle::DecodeFrom(Slice* input) {
-    if (GetVarint64(input, &offset_) &&GetVarint64(input, &size_)) {
-        return Status::OK();
-    } else {
+    Slice remaining = *input;
+    uint64_t offset, size;
+    if (!GetVarint64(&remaining, &offset) || !GetVarint64(&remaining, &size)) {
         return Status::Corruption("bad block handle");
     }
+    offset_ = offset;
+    size_ = size;
+    *input = remaining;
+    return Status::OK();
 }
 
 void Footer::EncodeTo(std::string* dst) const {
-    const size_t orignal_size = dst->size();
+    const size_t original_size = dst->size();
     metaindex_handle_.EncodeTo(dst);
     index_handle_.EncodeTo(dst);
 
-    dst->resize(2 * BlockHandle::kMaxEncodedLength);
-    PutVarint32(dst, static_cast<uint32_t>(kTableMagicNumber & 0xffffffffU));
-    PutVarint32(dst, static_cast<uint32_t>(kTableMagicNumber >> 32));
-    assert(dst->size() == orignal_size + kEncodedLength);
-    (void) orignal_size;
+    dst->resize(original_size + 2 * BlockHandle::kMaxEncodedLength);
+    PutFixed64(dst, kTableMagicNumber);
+    assert(dst->size() == original_size + kEncodedLength);
+    (void) original_size;
 }
 
 Status Footer::DecodeFrom(Slice* input) {
@@ -50,20 +55,18 @@ Status Footer::DecodeFrom(Slice* input) {
         return Status::Corruption("not an sstable (bad magic number)");
     }
 
-    Status result = metaindex_handle_.DecodeFrom(input);
-    if (result.ok()) {
-        result = index_handle_.DecodeFrom(input);
-    } 
-    if (result.ok()) {
-        result = index_handle_.DecodeFrom(input);
-    }
+    // Parse into temporary handles within the handle area, then commit once.
+    Slice handles(input->data(), 2 * BlockHandle::kMaxEncodedLength);
+    BlockHandle metaindex, index;
+    Status result = metaindex.DecodeFrom(&handles);
+    if (!result.ok()) return result;
+    result = index.DecodeFrom(&handles);
+    if (!result.ok()) return result;
 
-    if (result.ok()) {
-        const char* end = magic_ptr + 8;
-        *input = Slice(end, input->data() + input->size() - end);
-    }
-
-    return result;
+    metaindex_handle_ = metaindex;
+    index_handle_ = index;
+    input->remove_prefix(kEncodedLength);
+    return Status::OK();
 }
 
 /*
@@ -78,20 +81,26 @@ Status Footer::DecodeFrom(Slice* input) {
 */
 
 Status ReadBlock(RandomAccessFile* file, const ReadOptions& options, const BlockHandle& handle, BlockContents* result) {
-    result->data = Slice();
-    result->cachable = false;
-    result->heap_allocated = false;
-
-    size_t n = static_cast<size_t> (handle.size());
-    char* buf = new char[n + kBlockTrailerSize];    
+    assert(file != nullptr && result != nullptr);
+    // Validate before narrowing, allocating, or calling the file implementation.
+    if (handle.size() > std::numeric_limits<size_t>::max() - kBlockTrailerSize ||
+        handle.size() > std::numeric_limits<uint64_t>::max() - kBlockTrailerSize ||
+        handle.size() > static_cast<uint64_t>(std::numeric_limits<ptrdiff_t>::max()) -
+                            kBlockTrailerSize) {
+        return Status::Corruption("block size overflow");
+    }
+    const uint64_t read_size = handle.size() + kBlockTrailerSize;
+    if (handle.offset() > std::numeric_limits<uint64_t>::max() - read_size) {
+        return Status::Corruption("block range overflow");
+    }
+    const size_t n = static_cast<size_t>(handle.size());
+    std::unique_ptr<char[]> buf(new char[n + kBlockTrailerSize]);
     Slice contents;
-    Status s = file->Read(handle.offset(), n + kBlockTrailerSize, &contents, buf);
+    Status s = file->Read(handle.offset(), n + kBlockTrailerSize, &contents, buf.get());
     if (!s.ok()) {
-        delete[] buf;
         return s;
     }
     if (contents.size() != n + kBlockTrailerSize) {
-        delete[] buf;
         return Status::Corruption("truncated block read");
     }
 
@@ -101,27 +110,29 @@ Status ReadBlock(RandomAccessFile* file, const ReadOptions& options, const Block
         const uint32_t crc = crc32c::Unmask((DecodeFixed32(data + n + 1)));
         const uint32_t actual = crc32c::Value(data, n + 1);
         if (actual != crc) {
-            delete[] buf;
-            s = Status::Corruption("block checksum mismatch");
-            return s;
+            return Status::Corruption("block checksum mismatch");
         }
     }
 
+    BlockContents decoded;
     switch (static_cast<CompressionType>(static_cast<std::uint8_t>(data[n]))) {
         case CompressionType::kNoCompression:
-            if (data != buf) {
-                delete[] buf;
-                result->data = Slice(data, n);
-                result->heap_allocated = false;
-                result->cachable = false;
+            if (data != buf.get()) {
+                decoded.data = Slice(data, n);
             } else {
-                result->data = Slice(buf, n);
-                result->heap_allocated = true;
-                result->cachable = true;
+                decoded.data = Slice(buf.release(), n);
+                decoded.heap_allocated = true;
+                decoded.cachable = true;
             }
-        break;
+            break;
+        case CompressionType::kSnappyCompression:
+        case CompressionType::kZstdCompression:
+            return Status::NotSupported("block compression is not implemented");
+        default:
+            return Status::Corruption("bad block compression type");
     }
 
-    return s;
+    *result = decoded;
+    return Status::OK();
 }
 }

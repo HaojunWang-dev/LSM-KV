@@ -91,7 +91,7 @@ struct BlockContents {
 // 成功后填写三个字段：通过 heap_allocated 指明释放责任，通过 cachable
 // 指明缓存资格；借用 file 所持存储时，调用方须保证 file 的生命周期。
 // I/O 错误保留原 Status，截断或损坏返回 Corruption；失败不改变 result。
-// 此处仅声明接口，尚未提供读取、解压或 checksum 校验的实现。
+// 当前支持无压缩块；Snappy/Zstd 返回 NotSupported，未知类型返回 Corruption。
 Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
                  const BlockHandle& handle, BlockContents* result);
 

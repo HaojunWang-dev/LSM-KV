@@ -1,5 +1,6 @@
 #pragma once
 
+#include "comparator.h"
 #include "env.h"
 
 #include <cstddef>
@@ -19,6 +20,9 @@ enum class CompressionType : std::uint8_t {
 struct Options {
   // Borrowed; a caller-supplied Env must outlive the DB.
   Env* env = Env::Default();
+
+  //
+  const Comparator* comparator;
 
   // 借用的诊断 Logger；调用方拥有它，须覆盖 DB 及所有日志调用的生命周期。
   // nullptr 表示不输出诊断日志；目前不自动创建日志文件。

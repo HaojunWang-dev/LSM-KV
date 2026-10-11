@@ -1,7 +1,9 @@
 #include "table_block.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "comparator.h"
@@ -18,18 +20,68 @@ inline uint32_t Block::NumRestarts() const {
     return DecodeFixed32(data_ + size_ - sizeof(uint32_t));
 }
 
+static inline const char* DecodeEntry(const char* p, const char* limit,
+                                     uint32_t* shared, uint32_t* non_shared,
+                                     uint32_t* value_length);
+
 Block::Block(const BlockContents& contents)
     : data_(contents.data.data()),
       size_(contents.data.size()),
+      restart_offset_(0),
       owned_((contents.heap_allocated)) {
-        if (size_ < sizeof(uint32_t)) {
+        if (size_ < sizeof(uint32_t) ||
+            size_ > std::numeric_limits<uint32_t>::max()) {
             size_ = 0;
         } else {
-            size_t max_restarts_allowed = (size_ - sizeof(uint32_t)) / sizeof(uint32_t);
-            if (NumRestarts() > max_restarts_allowed) {
-                size_ = 0; 
+            const uint32_t num_restarts = NumRestarts();
+            const size_t max_restarts_allowed = (size_ - sizeof(uint32_t)) / sizeof(uint32_t);
+            if (num_restarts > max_restarts_allowed) {
+                size_ = 0;
             } else {
-                restart_offset_ = size_ - (1 + NumRestarts()) * sizeof(uint32_t);
+                restart_offset_ = static_cast<uint32_t>(
+                    size_ - (size_t{1} + num_restarts) * sizeof(uint32_t));
+                if (num_restarts == 0 && restart_offset_ != 0) {
+                    size_ = 0;
+                }
+                // Validate offsets before an iterator can form pointers from
+                // them. An empty block may contain one restart at offset zero.
+                uint32_t previous = 0;
+                for (uint32_t i = 0; i < num_restarts; ++i) {
+                    const uint32_t offset = DecodeFixed32(
+                        data_ + restart_offset_ + static_cast<size_t>(i) * sizeof(uint32_t));
+                    const bool empty_restart = restart_offset_ == 0 &&
+                                               num_restarts == 1 && offset == 0;
+                    if ((i == 0 && offset != 0) || (i > 0 && offset <= previous) ||
+                        (offset >= restart_offset_ && !empty_restart)) {
+                        size_ = 0;
+                        break;
+                    }
+                    previous = offset;
+                }
+                // An in-range offset can still point inside a key or value.
+                // Walk entry boundaries once, without reconstructing keys,
+                // up to the last restart so direct Seek/SeekToLast are safe.
+                const char* cursor = data_;
+                const char* limit = data_ + restart_offset_;
+                for (uint32_t next = 1; size_ != 0 && next < num_restarts;) {
+                    uint32_t shared, non_shared, value_length;
+                    const char* payload = DecodeEntry(cursor, limit, &shared,
+                                                      &non_shared, &value_length);
+                    if (payload == nullptr) {
+                        size_ = 0;
+                        break;
+                    }
+                    const size_t end = static_cast<size_t>(payload - data_) +
+                                       non_shared + value_length;
+                    const uint32_t restart = DecodeFixed32(
+                        data_ + restart_offset_ + static_cast<size_t>(next) * sizeof(uint32_t));
+                    if (end > restart) {
+                        size_ = 0;
+                        break;
+                    }
+                    if (end == restart) ++next;
+                    cursor = data_ + end;
+                }
             }
         }
       }
@@ -45,7 +97,7 @@ static inline const char* DecodeEntry(const char* p, const char* limit, uint32_t
     *non_shared = reinterpret_cast<const uint8_t*>(p)[1];
     *value_length = reinterpret_cast<const uint8_t*>(p)[2];
 
-    if (*shared | *non_shared | *value_length < 128) {
+    if ((*shared | *non_shared | *value_length) < 128) {
         p += 3;
     } else {
         if ((p = GetVarint32Ptr(p, limit, shared)) == nullptr) return nullptr;
@@ -53,7 +105,8 @@ static inline const char* DecodeEntry(const char* p, const char* limit, uint32_t
         if ((p = GetVarint32Ptr(p, limit, value_length)) == nullptr) return nullptr;
     }
 
-    if (static_cast<uint32_t>(limit - p) < (*non_shared + *value_length)) {
+    const size_t remaining = static_cast<size_t>(limit - p);
+    if (*non_shared > remaining || *value_length > remaining - *non_shared) {
         return nullptr;
     }
 
@@ -83,7 +136,7 @@ private:
 
     uint32_t GetRestartPoint(uint32_t index) {
         assert(index  < num_restarts_);
-        return DecodeFixed32(data_ + + restarts_ + restart_index_ * sizeof(uint32_t));
+        return DecodeFixed32(data_ + restarts_ + static_cast<size_t>(index) * sizeof(uint32_t));
     }
 
     void SeekToRestartPoint(uint32_t index) {
@@ -132,10 +185,12 @@ public:
         assert(Valid());
 
         const uint32_t original = current_;
-        while (GetRestartPoint(restart_index_) > original) {
+        while (GetRestartPoint(restart_index_) >= original) {
             if (restart_index_ == 0) {
                 current_ = restarts_;
                 restart_index_ = num_restarts_;
+                key_.clear();
+                value_.clear();
                 return;
             }
 
@@ -149,6 +204,7 @@ public:
 
 
     void Seek(const Slice& target) override {
+        if (!status_.ok()) return;
         uint32_t left  = 0;
         uint32_t right = num_restarts_ - 1;
         int current_key_compare = 0;
@@ -178,7 +234,7 @@ public:
             if (Compare(mid_key, target) < 0) {
                 left = mid;
             } else {
-                right = mid + 1; 
+                right = mid - 1;
             }
         }
 
@@ -200,21 +256,22 @@ public:
     }
 
     void SeekToFirst() override {
+        if (!status_.ok()) return;
         SeekToRestartPoint(0);
         ParseNextKey();
     }
 
     void SeekToLast() override {
+        if (!status_.ok()) return;
         SeekToRestartPoint(num_restarts_ - 1);
         while (ParseNextKey() && NextEntryOffset() < restarts_) {
-            ParseNextKey();
         }
     }
 private:
     void CorruptionError() {
         current_ = restarts_;
         restart_index_ = num_restarts_;
-        status_ = Status::Corruption("bad entey in block");
+        status_ = Status::Corruption("bad entry in block");
         key_.clear();
         value_.clear();
     }
@@ -235,12 +292,24 @@ private:
             CorruptionError();
             return false;
         } else {
+            // The containing restart region begins at or before this entry.
+            while (restart_index_ + 1 < num_restarts_ &&
+                   GetRestartPoint(restart_index_ + 1) <= current_) {
+                ++restart_index_;
+            }
+            if (GetRestartPoint(restart_index_) == current_ && shared != 0) {
+                CorruptionError();
+                return false;
+            }
+            const size_t end = static_cast<size_t>(p - data_) + non_shared + value_length;
+            if (restart_index_ + 1 < num_restarts_ &&
+                GetRestartPoint(restart_index_ + 1) < end) {
+                CorruptionError();
+                return false;
+            }
             key_.resize(shared);
             key_.append(p, non_shared);
             value_ = Slice(p + non_shared, value_length);
-            while (restart_index_ + 1 < num_restarts_ && GetRestartPoint(restart_index_ + 1) < current_) {
-                ++restart_index_;
-            }
         }
 
         return true;

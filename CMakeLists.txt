@@ -27,6 +27,8 @@ add_library(lsm_kv
     src/logging.cc
     src/table_format.cc
     src/table_block.cc
+    src/table.cc
+    src/two_level_iterator.cc
 )
 
 target_include_directories(lsm_kv
@@ -34,6 +36,8 @@ target_include_directories(lsm_kv
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# -DBUILD_TESTING=OFF builds only lsm_kv, without requiring GoogleTest.
+option(BUILD_TESTING "Build LSM-KV unit tests (requires GoogleTest)" ON)
 include(CTest)
 
 if(BUILD_TESTING)
@@ -58,6 +62,9 @@ if(BUILD_TESTING)
         tests/unit/skiplist_test.cc
         tests/unit/memtable_test.cc
         tests/unit/status_test.cc
+        tests/unit/table_format_test.cc
+        tests/unit/table_block_test.cc
+        tests/unit/table_test.cc
         tests/unit/write_batch_test.cc
         tests/unit/version_edit_test.cc
         tests/unit/version_set_test.cc
@@ -70,5 +77,9 @@ if(BUILD_TESTING)
     )
 
     include(GoogleTest)
-    gtest_discover_tests(lsm_kv_tests)
+    gtest_discover_tests(lsm_kv_tests TEST_LIST lsm_kv_discovered_tests)
+    # Only bound the new table tests; malformed input or a broken Seek must not
+    # leave CTest waiting forever. This file runs after test discovery.
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/table_test_properties.cmake")
 endif()

@@ -1,0 +1,5 @@
+foreach(table_test IN LISTS lsm_kv_discovered_tests)
+    if(table_test MATCHES "(^|/)(BlockHandle|Footer|ReadBlock|TableBlock|Table).*Test\\.")
+        set_tests_properties("${table_test}" PROPERTIES TIMEOUT 5)
+    endif()
+endforeach()

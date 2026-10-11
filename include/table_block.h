@@ -44,6 +44,8 @@ struct Comparator;
 class Block {
 
 public:
+    // Block 接管 heap_allocated 内容的释放责任，否则借用 contents.data。
+    // 借用的字节须覆盖 Block 的生命周期；Block 须覆盖其所有迭代器。
     explicit Block(const BlockContents& contents);
 
     Block(const Block&) = delete;
