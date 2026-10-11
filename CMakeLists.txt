@@ -26,6 +26,7 @@ add_library(lsm_kv
     src/filename.cc
     src/logging.cc
     src/table_format.cc
+    src/table_block.cc
 )
 
 target_include_directories(lsm_kv
