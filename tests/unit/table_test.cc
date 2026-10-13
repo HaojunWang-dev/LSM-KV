@@ -241,6 +241,30 @@ TEST_F(TableTest, QueriesKeysInSeveralDataBlocks) {
   ASSERT_NO_FATAL_FAILURE(ExpectQuery("g", "g", "7"));
 }
 
+TEST_F(TableTest, ValueInitializedOptionsSupportQueriesWithoutSettingComparator) {
+  options_ = Options{};
+  // Fail explicitly rather than dereferencing a missing default comparator.
+  ASSERT_NE(options_.comparator, nullptr);
+  Load(BasicImage());
+  ASSERT_TRUE(Open().ok());
+  ASSERT_NO_FATAL_FAILURE(ExpectQuery("b", "c", "3"));
+  ASSERT_NO_FATAL_FAILURE(ExpectQuery("g", "g", "7"));
+}
+
+TEST_F(TableTest, DefaultInitializedOptionsSupportQueriesWithoutSettingComparator) {
+  Options options;
+  options_ = options;
+  ASSERT_NE(options_.comparator, nullptr);
+  Load(MakeImage({{{"a", "first"}, {std::string("a\0b", 3), "binary"}},
+                  {{std::string("\xff", 1), "last"}}}));
+  ASSERT_TRUE(Open().ok());
+  ASSERT_NO_FATAL_FAILURE(ExpectQuery("a", "a", "first"));
+  ASSERT_NO_FATAL_FAILURE(ExpectQuery(std::string("a\0b", 3),
+                                     std::string("a\0b", 3), "binary"));
+  ASSERT_NO_FATAL_FAILURE(ExpectQuery(std::string("\xff", 1),
+                                     std::string("\xff", 1), "last"));
+}
+
 TEST_F(TableTest, PointQueryReturnsALowerBoundCandidateNotAnExactMatch) {
   Load(BasicImage());
   ASSERT_TRUE(Open().ok());
