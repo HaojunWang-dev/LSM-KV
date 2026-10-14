@@ -129,7 +129,62 @@ void TableBuilder::WriteRawBlock(const Slice& block_contents, CompressionType ty
     r->status = r->file->Append(block_contents);
 
     if (r->status.ok()) {
-        char trailer
+        char trailer[kBlockTrailerSize];
+        
+        uint32_t crc = crc32c::Value(block_contents.data(), block_contents.size());
+        crc = crc32c::Extend(crc, trailer, 1);
+        EncodeFixed32(trailer + 1, crc32c::Mask(crc));
+        r->status = r->file->Append(Slice(trailer, kBlockTrailerSize));
+        if (r->status.ok()) {
+            r->offset += block_contents.size() + kBlockTrailerSize;
+        }
     }
 }
+
+
+Status TableBuilder::status() { return rep_->status; }
+
+Status TableBuilder::Finish() {
+    Rep* r = rep_;
+    Flush();
+    assert(!r->closed);
+    r->closed = true;
+
+    BlockHandle index_block_handle;
+
+    if (ok()) {
+        if (r->pending_index_entry) {
+            r->options.comparator->FindShortSuccessor(&r->last_key);
+            std::string handle_encoding;
+            r->pending_handle.EncodeTo(&handle_encoding);
+            r->index_block.Add(r->last_key, Slice(handle_encoding));
+            r->pending_index_entry = true;
+        }
+
+        WriteBlock(&r->index_block, &index_block_handle);
+    }
+
+    if (ok()) {
+        Footer footer;
+        footer.set_index_handle(index_block_handle);
+        std::string footer_encoding;
+        footer.EncodeTo(&footer_encoding);
+        r->status = r->file->Append(footer_encoding);
+        if (r->status.ok()) {
+            r->offset += footer_encoding.size();
+        }
+    }
+
+    return r->status;
+}
+
+void TableBuilder::Abandon() {
+    Rep* r = rep_;
+    assert(!r->closed);
+    r->closed = true;
+}
+
+uint64_t TableBuilder::NumEntries() const { return rep_->num_entries; }
+
+uint64_t TableBuilder::FileSize() const { return rep_->offset; }
 }
