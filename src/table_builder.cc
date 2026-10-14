@@ -130,6 +130,7 @@ void TableBuilder::WriteRawBlock(const Slice& block_contents, CompressionType ty
 
     if (r->status.ok()) {
         char trailer[kBlockTrailerSize];
+        trailer[0] = static_cast<char>(type);
         
         uint32_t crc = crc32c::Value(block_contents.data(), block_contents.size());
         crc = crc32c::Extend(crc, trailer, 1);
@@ -142,7 +143,7 @@ void TableBuilder::WriteRawBlock(const Slice& block_contents, CompressionType ty
 }
 
 
-Status TableBuilder::status() { return rep_->status; }
+Status TableBuilder::status() const { return rep_->status; }
 
 Status TableBuilder::Finish() {
     Rep* r = rep_;
